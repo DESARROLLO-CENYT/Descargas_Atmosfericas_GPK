@@ -1,0 +1,33 @@
+# Lo que no tiene que entrar en la imagen. Cada archivo que se copia de mas
+# alarga el build y engorda el contenedor; en el plan Free de Render eso se
+# nota tanto en el tiempo de despliegue como en el arranque en frio.
+
+# Control de versiones y herramientas locales
+.git
+.gitignore
+.dockerignore
+.claude/
+.vscode/
+
+# Documentacion (no la necesita la app en ejecucion)
+README.md
+MEJORAS_PENDIENTES.md
+
+# Copias de respaldo y archivos de trabajo que no son fuente de datos
+*.BACKUP_*.xlsx
+Localizaciones_Corregidas.xlsx
+~$*.xlsx
+~$*.xls
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+env/
+
+# Entorno y temporales
+.env
+.env.*
+*.log
+*.tmp

@@ -1,0 +1,27 @@
+# Blueprint de Render (Infrastructure as Code).
+#
+# Con este archivo en la raiz del repositorio, Render crea el servicio con esta
+# configuracion en vez de tener que llenarla a mano en el panel: el despliegue
+# queda documentado y es reproducible.
+#
+# Como usarlo: en Render → New → Blueprint → conectar el repositorio.
+# Los valores marcados con AJUSTAR dependen de la cuenta de la empresa.
+
+services:
+  - type: web
+    name: dashboard-descargas-atmosfericas   # AJUSTAR: define la URL .onrender.com
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free                               # AJUSTAR si se sube de plan
+    region: virginia                         # AJUSTAR: la region de US East es la
+                                             # de menor latencia desde Colombia
+    branch: main                             # AJUSTAR: rama desde la que despliega
+    autoDeploy: true                         # cada push a esa rama redespliega
+
+    # La raiz sirve el index.html del tablero. Render la consulta para saber si
+    # el servicio esta vivo; es una lectura de archivo estatico, no toca datos.
+    healthCheckPath: /
+
+    # No hay variables de entorno propias: los tres archivos de datos viajan
+    # dentro de la imagen y el puerto lo inyecta Render en $PORT, que el
+    # Dockerfile ya usa en su CMD.

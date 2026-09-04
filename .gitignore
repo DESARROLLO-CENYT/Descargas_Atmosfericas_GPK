@@ -1,0 +1,50 @@
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Variables de entorno y secretos
+.env
+.env.*
+!.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Archivos temporales
+*.tmp
+*.temp
+*.log
+
+# Configuración de VS Code
+.vscode/
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# Archivos temporales de Excel
+~$*.xlsx
+~$*.xls
+
+# Archivos temporales de Python
+*.pyc
+
+# Herramientas de asistencia local (configuración personal, no del proyecto)
+.claude/
+
+# Bitácora de trabajo personal: notas de lo que falta por hacer.
+# Es un borrador de uso propio, no documentación del proyecto.
+MEJORAS_PENDIENTES.md
+
+# Copias de respaldo y versiones de trabajo de los archivos de datos.
+# Las fuentes oficiales (las tres que lee backend/main.py) SÍ se versionan;
+# lo que se excluye son los respaldos con fecha y los archivos intermedios,
+# que duplican megas en el historial sin aportar nada.
+*.BACKUP_*.xlsx
+Localizaciones_Corregidas.xlsx

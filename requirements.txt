@@ -1,0 +1,15 @@
+# --- API ---
+fastapi==0.141.1
+uvicorn==0.52.4
+python-multipart==0.0.32       # lectura de los formularios que envia el frontend
+
+# --- Datos y calculo espacial ---
+polars==1.44.1                 # lectura del parquet historico de descargas
+pyarrow==25.0.1                # backend de parquet que usa polars
+numpy==2.4.6
+scikit-learn==1.9.0            # BallTree con metrica haversine (cruce rayo-estructura)
+
+# --- Lectura y escritura de Excel ---
+pandas==3.0.5
+openpyxl==3.1.5                # generacion del informe descargable
+fastexcel==0.21.0              # lectura rapida de los .xlsx de inventario

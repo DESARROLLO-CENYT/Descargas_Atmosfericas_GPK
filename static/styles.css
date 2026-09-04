@@ -1,0 +1,1216 @@
+:root {
+    --bg-color: #000000;
+    --card-bg: rgba(255, 255, 255, 0.05);
+    --card-border: rgba(255, 255, 255, 0.1);
+    --text-primary: #ffffff;
+    --text-secondary: #a3a3a3;
+    --accent-primary: rgb(201, 0, 22);
+    --accent-secondary: rgb(255, 26, 51);
+    --success: #10b981;
+    --error: #ef4444;
+    --warning: #f59e0b;
+
+    /* ---- Escala vertical adaptativa ----
+       Todo lo que ocupa alto (paddings, gaps, tamaños de letra de los KPIs)
+       se define con clamp(minimo, medida-en-vh, maximo). Asi el tablero se
+       compacta solo en una laptop (768px de alto) y se agranda en un monitor
+       grande o un TV, de forma continua, sin depender de un breakpoint.
+       El minimo garantiza que nunca quede ilegible; el maximo, que no se
+       desparrame en pantallas muy altas. */
+    --sb-padding: clamp(0.55rem, 1.4vh, 1.2rem);
+    --sb-gap: clamp(0.3rem, 0.7vh, 0.65rem);
+    --brand-size: clamp(0.92rem, 1.55vh, 1.2rem);
+    --brand-pad-top: clamp(0.1rem, 0.45vh, 0.4rem);
+    --brand-pad-bottom: clamp(0.35rem, 1.1vh, 0.95rem);
+    --grupo-padding: clamp(0.42rem, 1.05vh, 0.85rem);
+    --grupo-gap: clamp(0.28rem, 0.75vh, 0.62rem);
+    /* Separacion ENTRE cajas de filtros. Va aparte de --grupo-gap (que separa
+       campos dentro de una caja): si son iguales, los dos bloques se leen como
+       una sola masa pesada. Crece con la pantalla pero con tope, porque pasado
+       cierto punto las cajas dejan de leerse como un conjunto */
+    --grupo-sep: clamp(0.85rem, 2.6vh, 1.9rem);
+    --campo-padding-y: clamp(0.28rem, 0.68vh, 0.55rem);
+    --label-gap: clamp(0.1rem, 0.3vh, 0.28rem);
+    --btn-padding: clamp(0.45rem, 0.95vh, 0.78rem);
+    --kpi-padding: clamp(0.6rem, 1.4vh, 1.15rem);
+    /* UN solo tamano para el valor de TODAS las tarjetas (Mapa, Datos,
+       Calendario y Simulador). Antes convivian tres: los numeros sueltos a
+       2.2rem, las tarjetas del calendario a 1.55rem y las fechas/horas del
+       simulador a 1.55rem, y en una misma fila se veian de distinto tamano.
+       El tope lo marca el texto mas largo que puede aparecer ("02:00-05:00",
+       "17:00 - 18:00", "31 ago 2026"): tiene que entrar en una linea en la
+       tarjeta mas angosta, por eso la medida sigue tambien al ancho (vw) y no
+       solo al alto (vh) -- con 5 tarjetas por fila el limite es el ancho. */
+    --kpi-size: clamp(1.05rem, min(3vh, 1.62vw), 1.9rem);
+    /* Alto minimo de los mapas: en una laptop baja se conforma con menos */
+    --mapa-min: clamp(200px, 38vh, 380px);
+}
+
+/* Pantallas de poca altura (laptops de 720p y similares): se aprieta un punto
+   mas la escala vertical para que los filtros entren completos sin barra de
+   desplazamiento. No afecta a monitores ni TVs, que ya entran holgados. */
+@media (max-height: 780px) {
+    :root {
+        --grupo-gap: clamp(0.24rem, 0.45vh, 0.62rem);
+        --campo-padding-y: clamp(0.24rem, 0.45vh, 0.55rem);
+        --sb-padding: clamp(0.5rem, 1vh, 1.2rem);
+        --grupo-padding: clamp(0.38rem, 0.85vh, 0.85rem);
+        /* Se prefiere apretar los campos antes que la separacion entre cajas:
+           es lo que sostiene la lectura en dos bloques cuando hay poco alto */
+        --grupo-sep: clamp(0.75rem, 2.2vh, 1.9rem);
+    }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* Cualquier regla con display propio le gana al [hidden]{display:none} del
+   navegador. Sin esto, ocultar un elemento con el atributo no surte efecto y el
+   sintoma es confuso: el JS dice hidden=true y en pantalla se sigue viendo. */
+[hidden] { display: none !important; }
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow-x: hidden;
+    position: relative;
+}
+
+/* Background animated glow orbs */
+.background-elements {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    z-index: -1;
+    overflow: hidden;
+}
+
+.glow-orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(100px);
+    opacity: 0.3;
+    animation: float 20s infinite alternate ease-in-out;
+}
+
+.orb-1 { width: 400px; height: 400px; background: radial-gradient(circle, var(--accent-primary) 0%, transparent 70%); top: -100px; left: -100px; }
+.orb-2 { width: 500px; height: 500px; background: radial-gradient(circle, var(--accent-secondary) 0%, transparent 70%); bottom: -150px; right: -100px; animation-delay: -5s; }
+.orb-3 { width: 300px; height: 300px; background: radial-gradient(circle, var(--success) 0%, transparent 70%); top: 50%; left: 50%; transform: translate(-50%, -50%); opacity: 0.15; animation-duration: 15s; }
+
+@keyframes float { 0% { transform: translate(0, 0); } 100% { transform: translate(50px, 50px); } }
+
+/* Layout */
+.dashboard-layout {
+    display: flex;
+    min-height: 100vh;
+    padding: 1.5rem;
+    gap: 1.5rem;
+}
+
+@media (max-width: 900px) {
+    .dashboard-layout { flex-direction: column; }
+}
+
+/* Glass Card Global */
+.glass-card {
+    background: var(--card-bg);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--card-border);
+    border-radius: 20px;
+    box-shadow: 0 15px 35px -10px rgba(0, 0, 0, 0.4);
+}
+
+/* Sidebar */
+.sidebar {
+    width: 340px;
+    flex-shrink: 0;
+    padding: var(--sb-padding);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sb-gap);
+    height: calc(100vh - 3rem);
+    position: sticky;
+    top: 1.5rem;
+    overflow-y: auto;
+}
+
+@media (max-width: 900px) {
+    .sidebar { width: 100%; height: auto; position: relative; top: 0; }
+}
+
+/* El formulario ocupa el alto disponible y ancla el boton abajo. La separacion
+   entre cajas la fija el gap (con tope): repartir el sobrante a partes iguales
+   entre las juntas las alejaba 150 px en un monitor grande y las cajas dejaban
+   de leerse como un conjunto.
+   flex-shrink: 0 es clave: si se le permite encogerse, en pantallas bajas el
+   form queda mas corto que su contenido y los campos se desbordan encima del
+   mensaje de estado. Sin encogerse, el sidebar simplemente hace scroll. */
+#uploadForm {
+    display: flex;
+    flex-direction: column;
+    flex: 1 0 auto;
+    gap: var(--grupo-sep);
+}
+#uploadForm #btnSubmit { margin-top: auto; }
+
+@media (max-width: 900px) {
+    #uploadForm { display: block; }
+    #uploadForm #btnSubmit { margin-top: 0; }
+    #uploadForm .filter-group { margin-bottom: var(--grupo-sep); }
+}
+
+/* Solo el titulo (el logo se movio al header del tablero). Se le da aire
+   arriba y una linea abajo para separarlo con claridad de los filtros */
+.brand {
+    text-align: center;
+    padding: var(--brand-pad-top) 0 var(--brand-pad-bottom);
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--card-border);
+}
+.brand-titulo {
+    font-size: var(--brand-size);
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.11em;
+    line-height: 1.35;
+    background: linear-gradient(135deg, #fff, #94a3b8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+/* File Inputs */
+.file-drop-area {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 1.5rem 1rem;
+    border: 2px dashed rgba(255, 255, 255, 0.2);
+    border-radius: 12px;
+    transition: all 0.3s ease;
+    cursor: pointer;
+    background: rgba(255,255,255,0.01);
+}
+.file-drop-area:hover, .file-drop-area.is-active { border-color: var(--accent-primary); background: rgba(59, 130, 246, 0.05); }
+.file-icon { font-size: 1.8rem; margin-bottom: 0.5rem; }
+.file-msg { font-size: 0.8rem; color: var(--text-secondary); text-align: center; pointer-events: none; }
+.file-input { position: absolute; left: 0; top: 0; height: 100%; width: 100%; cursor: pointer; opacity: 0; }
+
+/* Los controles se agrupan por la pregunta que responden: donde (ubicacion)
+   y con que parametros. Cada grupo es una caja para que se lean como
+   bloques distintos y no como seis campos sueltos */
+.filter-group {
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.03);
+    padding: var(--grupo-padding);
+    /* La separacion entre cajas la pone el gap del formulario */
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--grupo-gap);
+}
+/* float:left saca al legend de la muesca del borde y lo vuelve un bloque
+   normal, para que quede dentro de la caja y centrado */
+.filter-group legend {
+    float: left;
+    width: 100%;
+    text-align: center;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-secondary);
+    padding: 0 0 var(--label-gap) 0;
+    margin-bottom: 0.1rem;
+    border-bottom: 1px solid var(--card-border);
+}
+
+.options-wrapper label { font-size: 0.78rem; color: var(--text-secondary); font-weight: 600; display: block; margin-bottom: var(--label-gap); }
+.options-wrapper input, .options-wrapper select { width: 100%; background: rgba(0, 0, 0, 0.25); border: 1px solid var(--card-border); border-radius: 8px; padding: var(--campo-padding-y) 0.7rem; color: var(--text-primary); font-family: inherit; font-size: 0.85rem; }
+.options-wrapper input:focus, .options-wrapper select:focus { outline: none; border-color: var(--accent-primary); }
+.options-wrapper select option { background: var(--bg-color); color: var(--text-primary); }
+
+/* Arreglo para que el icono del calendario sea visible en fondo oscuro */
+input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+    cursor: pointer;
+    width: 20px;
+    height: 20px;
+}
+
+.btn-primary {
+    width: 100%;
+    padding: var(--btn-padding);
+    border: none;
+    border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    color: white;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    box-shadow: 0 2px 6px -2px rgba(0, 0, 0, 0.5);
+    /* cubic-bezier con rebote corto: la subida se siente viva y la bajada seca */
+    transition: transform 0.18s cubic-bezier(0.34, 1.3, 0.64, 1), box-shadow 0.18s ease, filter 0.18s ease;
+    display: flex; justify-content: center; align-items: center; gap: 10px;
+}
+.btn-primary:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 24px -10px var(--accent-primary), 0 2px 6px -2px rgba(0, 0, 0, 0.5);
+    filter: brightness(1.12);
+}
+/* Al presionar baja hasta el ras y la sombra se contrae: da la sensacion de
+   estar hundiendo el boton en vez de solo cambiarle el color */
+.btn-primary:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: 0 1px 3px -1px rgba(0, 0, 0, 0.6);
+    filter: brightness(0.95);
+    transition-duration: 0.07s;
+}
+.btn-primary:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+.btn-primary:disabled { opacity: 0.7; cursor: not-allowed; transform: none; filter: none; box-shadow: none; }
+
+@media (prefers-reduced-motion: reduce) {
+    .btn-primary { transition: filter 0.18s ease; }
+    .btn-primary:hover:not(:disabled), .btn-primary:active:not(:disabled) { transform: none; }
+}
+
+.spinner { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; border-top-color: white; animation: spin 1s ease-in-out infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Solo queda el cartel de error: el verde de "analisis completado" repetia lo
+   que ya dicen las tarjetas de KPI y engordaba el sidebar sin aportar nada */
+.status-message { font-size: 0.85rem; padding: 0.8rem; border-radius: 8px; display: none; text-align: center; }
+.status-error { display: block; background: rgba(239, 68, 68, 0.1); color: var(--error); border: 1px solid rgba(239, 68, 68, 0.2); }
+
+/* Main Content */
+.main-content {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 1.15rem;
+    min-width: 0;
+}
+
+.intro-screen {
+    position: fixed;
+    top: 0; left: 0; width: 100vw; height: 100vh;
+    display: flex; justify-content: center; align-items: center;
+    background-color: var(--bg-color);
+    z-index: 1000;
+}
+
+.welcome-card {
+    padding: 4rem;
+    text-align: center;
+    max-width: 600px;
+}
+
+/* KPIs */
+/* Tarjetas compactas a proposito: el mapa es el protagonista y estas son la
+   referencia numerica que lo acompaña. El minimo de 170px mantiene las cinco
+   en una sola fila hasta 1280px de ancho */
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(154px, 1fr)); gap: 0.8rem; }
+/* El lateral es angosto a proposito: son 5 tarjetas por fila y cada milimetro
+   de padding se lo quita al texto, que es lo que fuerza a bajar la letra */
+.kpi-card { padding: var(--kpi-padding) 0.65rem; text-align: center; }
+
+/* ---- Fondo unificado de las tarjetas ----
+   Este es el tono que tenian las del simulador cuando vivian dentro del panel
+   del mapa: dos capas de vidrio superpuestas, rgba(255,255,255,0.05) sobre
+   rgba(255,255,255,0.05), que componen 1-(0.95*0.95)=0.0975, y dos bordes de
+   0.1 que componen 1-(0.9*0.95)=0.145. Se fija ese resultado de forma explicita
+   para que todas las tarjetas del tablero se vean iguales sin depender de
+   cuantos contenedores translucidos tengan encima. */
+.kpi-card {
+    background: rgba(255, 255, 255, 0.0975);
+    border-color: rgba(255, 255, 255, 0.145);
+}
+.kpi-card h3 { font-size: 0.79rem; color: var(--text-secondary); font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 0.3rem; line-height: 1.3; }
+.kpi-value { font-size: var(--kpi-size); font-weight: 800; color: white; line-height: 1.1; }
+.highlight-error { color: var(--error); }
+.highlight-warning { color: var(--warning); }
+.kpi-sub { display: block; margin-top: 0.3rem; font-size: 0.7rem; color: var(--text-secondary); line-height: 1.3; }
+/* El titulo de las tarjetas va en mayusculas, pero los simbolos de unidad no se
+   escriben asi: el metro es "m", nunca "M" (que es el prefijo mega) */
+.kpi-unidad { text-transform: none; }
+
+/* (El tamano de estas tarjetas ya no se excepciona: --kpi-size esta calculado
+   para que entre el texto mas largo de cualquier pestana) */
+
+/* Map Section */
+/* Sin las secciones de abajo el mapa es el unico contenido: ocupa el alto
+   disponible en vez de quedar clavado en 600px con scroll de sobra */
+.map-section { padding: 1.2rem 1.25rem 1.25rem; display: flex; flex-direction: column; gap: 0.85rem; flex-grow: 1; min-height: 0; }
+.map-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
+.map-header h2 { font-size: 1.2rem; }
+.map-controls label { margin-left: 1rem; font-size: 0.9rem; cursor: pointer; color: var(--text-secondary); }
+.map-controls input { accent-color: var(--accent-primary); }
+
+.map-legend { display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.85rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--card-border); }
+.legend-item { display: flex; align-items: center; gap: 0.4rem; }
+.dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid white; flex-shrink: 0; }
+
+/* Titulo comun de los bloques de la leyenda */
+.map-legend .legend-titulo { color: var(--text-primary); font-weight: 600; }
+
+/* Filtro de proteccion: el punto de color es a la vez el boton y la leyenda.
+   Se enciende solo en la opcion activa; apagado queda blanco. */
+.legend-proteccion { gap: 0.75rem; color: var(--text-secondary); }
+.legend-proteccion label { display: flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+.legend-proteccion label:hover { color: var(--text-primary); }
+
+/* El control nativo se oculta pero sigue recibiendo foco y teclado */
+.legend-proteccion input { position: absolute; opacity: 0; width: 0; height: 0; }
+.legend-proteccion .dot { background: #fff; border-color: rgba(255, 255, 255, 0.45); }
+.legend-proteccion input:focus-visible + .dot { outline: 2px solid var(--accent-secondary); outline-offset: 2px; }
+
+/* Colores de proteccion encendidos. Los mismos que COLOR_PROTECCION en
+   script.js: si se cambian aca, cambiarlos alla tambien */
+.legend-proteccion input:checked + .dot-todos { background: linear-gradient(90deg, #2563eb 50%, #9333ea 50%); }
+.legend-proteccion input:checked + .dot-estructuras { background: #2563eb; }
+/* Rombo, igual que el simbolo con el que se dibujan en el mapa */
+.legend-proteccion .dot-porticos { border-radius: 2px; transform: rotate(45deg); }
+.legend-proteccion input:checked + .dot-porticos { background: #84cc16; }
+.legend-proteccion input:checked + .dot-protegidas,
+.legend-proteccion input:checked + .dot-dps,
+.legend-proteccion input:checked + .dot-dsd { background: #9333ea; }
+
+.legend-sep { width: 1px; align-self: stretch; background: var(--card-border); }
+
+/* Muestra del portico: mismo verde y mismo rombo que dibuja el mapa. El color
+   es COLOR_PORTICO en script.js: si se cambia aca, cambiarlo alla tambien */
+.legend-portico { color: var(--text-secondary); gap: 0.45rem; }
+.sw-rombo {
+    width: 11px;
+    height: 11px;
+    background: #84cc16;
+    border: 2px solid #fff;
+    transform: rotate(45deg);
+    flex-shrink: 0;
+    display: inline-block;
+}
+.subfiltros { display: flex; align-items: center; gap: 0.75rem; }
+
+/* Los subfiltros solo afinan dentro de DPS/DSD: con "Todos" no aplican */
+.legend-proteccion.sub-inactivos .subfiltros { opacity: 0.35; }
+.legend-proteccion.sub-inactivos .subfiltros label { cursor: default; }
+.legend-proteccion.sub-inactivos .subfiltros label:hover { color: var(--text-secondary); }
+
+/* Escala de corriente de las descargas. Las paradas son las mismas que usa
+   ESCALA_CORRIENTE en script.js: si se cambian aca, cambiarlas alla tambien */
+.legend-corriente { gap: 0.5rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.legend-corriente .corriente-bar {
+    width: 120px;
+    height: 10px;
+    border-radius: 5px;
+    background: linear-gradient(90deg, #fde047 0%, #f97316 50%, #dc2626 100%);
+}
+
+/* Leyenda del mapa de calor: la escala es relativa al recorte visible, asi que
+   sin los extremos numericos el color no significaria nada concreto */
+.heat-legend { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; font-size: 0.78rem; color: var(--text-secondary); padding-bottom: 0.5rem; border-bottom: 1px solid var(--card-border); }
+.heat-legend .heat-label { font-weight: 600; color: var(--text-primary); }
+.heat-legend .heat-bar { width: 160px; height: 10px; border-radius: 5px; background: linear-gradient(90deg, #1d4ed8 0%, #06b6d4 35%, #facc15 60%, #f97316 80%, #dc2626 100%); }
+.heat-legend .heat-item { display: flex; align-items: center; gap: 0.4rem; }
+/* Mismo morado con borde blanco que el Mapa General, para que DPS/DSD se lea
+   igual en los dos mapas */
+.heat-legend .ring-demo { width: 13px; height: 13px; border-radius: 50%; background: #9333ea; border: 2.5px solid #fff; display: inline-block; flex-shrink: 0; }
+.heat-umbral { display: flex; align-items: center; gap: 0.5rem; }
+.heat-umbral:first-of-type { margin-left: auto; }
+
+/* La mancha es contexto, no el dato: se atenua para que las estructuras
+   sigan siendo lo primero que ve el ojo */
+.leaflet-heatmap-layer { opacity: var(--opacidad-calor, 0.6); transition: opacity 0.15s ease; }
+.heat-umbral input[type="range"] { width: 110px; accent-color: var(--accent-primary); cursor: pointer; }
+.heat-umbral output { min-width: 62px; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
+/* El panel flota sobre el mapa para no robarle alto a la vista satelital */
+.map-wrap { position: relative; flex-grow: 1; display: flex; min-height: 0; }
+.top-panel { position: absolute; top: 12px; right: 12px; z-index: 500; width: 232px; max-height: calc(100% - 24px); display: flex; flex-direction: column; background: rgba(10, 10, 12, 0.88); border: 1px solid var(--card-border); border-radius: 10px; backdrop-filter: blur(6px); overflow: hidden; }
+.top-panel header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.6rem 0.75rem; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; line-height: 1.35; color: var(--text-secondary); border-bottom: 1px solid var(--card-border); }
+.top-panel header button { flex-shrink: 0; }
+
+/* El globo al pasar el cursor usa el mismo aspecto que el fijo del clic */
+.tooltip-estructura { font-size: 0.8rem; line-height: 1.5; padding: 0.5rem 0.65rem; border: none; border-radius: 8px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45); }
+.top-panel header button { background: none; border: none; color: var(--text-secondary); font-size: 1rem; line-height: 1; cursor: pointer; padding: 0 0.25rem; }
+.top-panel header button:hover { color: var(--text-primary); }
+.top-panel ol { list-style: none; margin: 0; padding: 0.25rem; overflow-y: auto; }
+.top-panel li { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.5rem; border-radius: 6px; cursor: pointer; font-size: 0.78rem; }
+.top-panel li:hover { background: rgba(255, 255, 255, 0.07); }
+.top-panel .top-dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }
+.top-panel .top-tag { font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.top-panel .top-n { margin-left: auto; color: var(--warning); font-weight: 700; font-variant-numeric: tabular-nums; }
+.top-panel.plegado ol { display: none; }
+
+#map { width: 100%; height: auto; min-height: var(--mapa-min); border-radius: 12px; z-index: 1; flex-grow: 1; }
+
+
+/* Logos */
+.landing-logos {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 2rem;
+    margin-bottom: 2rem;
+}
+.brand-logo {
+    max-height: 300px;
+    object-fit: contain;
+}
+.sidebar-logo {
+    max-height: 84px;
+    width: auto;
+    display: block;
+    margin: 0 auto 1.25rem auto;
+    object-fit: contain;
+}
+
+/* Calendario de fechas (flatpickr) */
+/* Flota sobre el tablero, colgado del body: dentro del sidebar hacia crecer el
+   panel al abrirse y salia una barra de desplazamiento. El ancho lo iguala el
+   JS al del campo; la posicion (arriba o abajo del input) la resuelve la
+   libreria segun el sitio que quede en pantalla. */
+.flatpickr-calendar.cal-filtro {
+    z-index: 5000;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+    padding-bottom: 0.35rem;
+    font-size: 0.8rem;
+}
+.flatpickr-calendar.cal-filtro .flatpickr-rContainer, .flatpickr-calendar.cal-filtro .flatpickr-days { width: 100%; max-width: 100%; }
+.flatpickr-calendar.cal-filtro .dayContainer { width: 100%; max-width: 100%; min-width: 0; padding: 0 0.3rem; }
+
+/* La libreria trae una escala tipografica propia que no guarda relacion con
+   la del dashboard: se baja para que el calendario no domine el sidebar */
+.flatpickr-calendar.cal-filtro .flatpickr-months { padding-top: 0.3rem; }
+.flatpickr-calendar.cal-filtro .flatpickr-month { height: 32px; }
+.flatpickr-calendar.cal-filtro .flatpickr-current-month { font-size: 0.9rem; padding-top: 5px; }
+.flatpickr-calendar.cal-filtro .flatpickr-current-month .flatpickr-monthDropdown-months { font-size: 0.9rem; font-weight: 600; }
+.flatpickr-calendar.cal-filtro .flatpickr-current-month input.cur-year { font-size: 0.9rem; font-weight: 600; }
+.flatpickr-calendar.cal-filtro .flatpickr-prev-month, .flatpickr-calendar.cal-filtro .flatpickr-next-month { padding: 6px 8px; }
+.flatpickr-calendar.cal-filtro .flatpickr-prev-month svg, .flatpickr-calendar.cal-filtro .flatpickr-next-month svg { width: 12px; height: 12px; }
+/* El desplegable de meses y el año vienen con estilo de formulario del
+   navegador; se aplanan para que se lean sobre el fondo claro del calendario */
+.flatpickr-calendar.cal-filtro .flatpickr-monthDropdown-months,
+.flatpickr-calendar.cal-filtro input.cur-year {
+    width: auto;
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0 0.2rem;
+    color: #374151;
+}
+.flatpickr-calendar.cal-filtro .flatpickr-monthDropdown-months option { background: #ffffff; color: #374151; }
+.flatpickr-calendar.cal-filtro .flatpickr-monthDropdown-months option:checked { background: #d1fae5; color: #065f46; }
+
+.flatpickr-calendar.cal-filtro span.flatpickr-weekday { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #9ca3af; }
+.flatpickr-calendar.cal-filtro .flatpickr-day { max-width: none; flex-basis: 14.2857%; height: 32px; line-height: 32px; font-size: 0.78rem; border-radius: 6px; }
+.flatpickr-calendar.cal-filtro .flatpickr-day.prevMonthDay, .flatpickr-calendar.cal-filtro .flatpickr-day.nextMonthDay { opacity: 0.4; }
+
+.flatpickr-day.con-datos { background: #d1fae5; border-color: #a7f3d0; color: #065f46; font-weight: 600; }
+.flatpickr-day.con-datos:hover { background: #a7f3d0; border-color: #6ee7b7; }
+/* Rojo GeoPark: dias con al menos una descarga dentro del radio de las estructuras */
+.flatpickr-day.con-radio { background: #fecaca; border-color: #fca5a5; color: #7f1d1d; font-weight: 700; }
+.flatpickr-day.con-radio:hover { background: #fca5a5; border-color: #f87171; }
+.flatpickr-day.selected, .flatpickr-day.selected.con-datos, .flatpickr-day.selected.con-radio, .flatpickr-day.selected:hover { background: var(--accent-primary); border-color: var(--accent-primary); color: #fff; }
+.flatpickr-day.flatpickr-disabled, .flatpickr-day.prevMonthDay, .flatpickr-day.nextMonthDay { background: transparent; }
+
+/* La leyenda va al final del bloque; se separa de las fechas con una linea
+   para que se lea como una nota, no como un campo mas */
+.date-legend { margin-top: 0.25rem; padding-top: 0.5rem; border-top: 1px solid var(--card-border); display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.68rem; color: var(--text-secondary); }
+.date-legend .legend-row { display: flex; align-items: center; gap: 0.5rem; }
+.day-swatch { width: 13px; height: 13px; border-radius: 4px; display: inline-block; flex-shrink: 0; }
+.day-swatch.impacto-radio { background: #fecaca; border: 1px solid #fca5a5; }
+.day-swatch.has-data { background: #d1fae5; border: 1px solid #a7f3d0; }
+.day-swatch.no-data { background: #ffffff; border: 1px solid #d4d4d4; }
+
+/* ---- Buscador de estructura especifica ----
+   Son ~730 tags: un select obligaria a desplazarse a ciegas, asi que se filtra
+   escribiendo y se resalta la parte del tag que coincide con lo tecleado */
+.buscador { position: relative; }
+
+.buscador-input {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 0.6rem 2rem 0.6rem 0.7rem;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.875rem;
+}
+.buscador-input:focus { outline: none; border-color: var(--accent-primary); }
+.buscador-input::placeholder { color: rgba(163, 163, 163, 0.6); }
+/* Una estructura elegida es un filtro activo, no texto suelto: se marca */
+.buscador.activo .buscador-input { border-color: var(--accent-primary); font-weight: 600; }
+
+.buscador-limpiar {
+    position: absolute;
+    top: 50%;
+    right: 0.45rem;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.25rem;
+}
+.buscador-limpiar:hover { color: var(--text-primary); }
+
+.buscador-lista {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 600;
+    max-height: 260px;
+    overflow-y: auto;
+    list-style: none;
+    margin: 0;
+    padding: 0.25rem;
+    background: rgba(12, 12, 14, 0.97);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    box-shadow: 0 12px 28px -12px rgba(0, 0, 0, 0.9);
+}
+.buscador-lista.arriba { top: auto; bottom: calc(100% + 4px); }
+.buscador-lista li {
+    padding: 0.4rem 0.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    line-height: 1.3;
+}
+.buscador-lista li:hover,
+.buscador-lista li.activa { background: rgba(255, 255, 255, 0.09); }
+.buscador-lista .op-tag { display: block; font-weight: 600; color: var(--text-primary); }
+.buscador-lista .op-ruta { display: block; font-size: 0.7rem; color: var(--text-secondary); margin-top: 0.1rem; }
+/* El resaltado es lo que hace legible una lista larga: dice por que entro cada
+   resultado sin tener que comparar cadenas a ojo */
+.buscador-lista mark {
+    background: rgba(201, 0, 22, 0.35);
+    color: #fff;
+    border-radius: 3px;
+    padding: 0 1px;
+}
+.buscador-lista .op-vacio,
+.buscador-lista .op-mas {
+    padding: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    cursor: default;
+}
+.buscador-lista .op-vacio:hover,
+.buscador-lista .op-mas:hover { background: none; }
+
+.buscador-nota { font-size: 0.68rem; color: var(--text-secondary); margin-top: 0.25rem; line-height: 1.3; }
+.buscador-nota.aviso { color: var(--warning); }
+
+/* ---- Panel de detalle de la estructura ----
+   Vive del lado opuesto al top-panel para que puedan convivir sin taparse */
+.detalle-panel {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 500;
+    width: 262px;
+    max-height: calc(100% - 24px);
+    display: flex;
+    flex-direction: column;
+    background: rgba(10, 10, 12, 0.9);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    backdrop-filter: blur(6px);
+    overflow: hidden;
+}
+.detalle-panel header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.6rem 0.75rem;
+    border-bottom: 1px solid var(--card-border);
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.detalle-panel header button {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 0.25rem;
+}
+.detalle-panel header button:hover { color: var(--text-primary); }
+.detalle-panel > div { overflow-y: auto; padding: 0.5rem 0.75rem 0.75rem; }
+.detalle-panel h4 {
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent-secondary);
+    margin: 0.75rem 0 0.35rem;
+}
+.detalle-panel h4:first-child { margin-top: 0.25rem; }
+.detalle-panel dl { display: grid; grid-template-columns: auto 1fr; gap: 0.2rem 0.6rem; margin: 0; }
+.detalle-panel dt { font-size: 0.7rem; color: var(--text-secondary); }
+.detalle-panel dd { font-size: 0.7rem; color: var(--text-primary); margin: 0; text-align: right; word-break: break-word; }
+
+/* ---- Header: pestañas a la izquierda, logo a la derecha ---- */
+.dashboard-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.header-logo { max-height: 56px; width: auto; object-fit: contain; flex-shrink: 0; }
+
+/* ---- Conmutador de vistas Mapa / Datos ---- */
+.vista-tabs { display: flex; gap: 0.5rem; flex-shrink: 0; flex-wrap: wrap; }
+.vista-tab {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    padding: 0.55rem 1.4rem;
+    cursor: pointer;
+    text-transform: uppercase;
+}
+.vista-tab:hover { color: var(--text-primary); border-color: rgba(255, 255, 255, 0.25); }
+.vista-tab.activa {
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    border-color: transparent;
+    color: #fff;
+}
+
+/* ---- Vista de datos ---- */
+.datos-section { display: flex; flex-direction: column; gap: 1rem; min-height: 0; }
+.grafica-card { padding: 1.25rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.grafica-card h2 { font-size: 1rem; }
+.grafica-nota { font-size: 0.78rem; color: var(--text-secondary); }
+/* Grafica y medidas en dos columnas: la leyenda de Chart.js vive dentro del
+   lienzo (a su derecha) y las medidas quedan por fuera, sin pisarla */
+.grafica-layout { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1.25rem; align-items: stretch; margin-top: 0.5rem; }
+
+/* Altura fija: Chart.js con maintainAspectRatio:false necesita que el
+   contenedor la defina, si no crece sin limite en cada repintado */
+.grafica-wrap { position: relative; height: 340px; min-width: 0; }
+
+/* Columna lateral: leyenda arriba y valores debajo, para que el grafico se
+   quede con todo el ancho que sobra */
+.grafica-lateral {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 1.1rem;
+    min-width: 150px;
+    padding-left: 1.25rem;
+    border-left: 1px solid var(--card-border);
+}
+
+.grafica-leyenda { list-style: none; display: flex; flex-direction: column; gap: 0.45rem; }
+.grafica-leyenda li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+/* Cada muestra imita el trazo de su serie: bloque para las barras y linea del
+   mismo patron para las demas. Los colores y patrones son los de script.js */
+.sw { width: 20px; flex-shrink: 0; }
+.sw-barra { height: 11px; background: rgba(37, 99, 235, 0.85); border-radius: 2px; }
+.sw-gauss { border-top: 2px solid #7dd3fc; }
+.sw-media { border-top: 2px dashed #f59e0b; }
+.sw-mediana { border-top: 2px dashed #22c55e; }
+.sw-p99 { border-top: 2px dotted #ef4444; }
+
+.medidas-col {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--card-border);
+}
+.medida h3 {
+    font-size: 0.66rem;
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.15rem;
+}
+.medida-valor { font-size: 1.25rem; font-weight: 800; line-height: 1.15; }
+
+/* En pantallas angostas la columna lateral pasa debajo y se acomoda en fila,
+   para no dejar al grafico sin ancho */
+@media (max-width: 900px) {
+    .grafica-layout { grid-template-columns: 1fr; }
+    .grafica-lateral {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1.25rem;
+        border-left: none;
+        border-top: 1px solid var(--card-border);
+        padding-left: 0;
+        padding-top: 0.9rem;
+    }
+    .grafica-leyenda { flex-direction: row; flex-wrap: wrap; gap: 0.9rem; }
+    .medidas-col { flex-direction: row; gap: 1.5rem; border-top: none; padding-top: 0; }
+}
+
+/* ---- Tablas de la vista de datos ---- */
+.tablas-card { padding: 1.25rem; display: flex; flex-direction: column; gap: 0.9rem; min-height: 0; }
+
+.tabla-tabs { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+.tabla-tab {
+    background: transparent;
+    border: 1px solid var(--card-border);
+    border-radius: 999px;
+    color: var(--text-secondary);
+    font-family: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.4rem 0.95rem;
+    cursor: pointer;
+}
+.tabla-tab:hover { color: var(--text-primary); border-color: rgba(255, 255, 255, 0.28); }
+.tabla-tab.activa { background: var(--accent-primary); border-color: var(--accent-primary); color: #fff; }
+
+.tabla-barra { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.tabla-buscador {
+    flex: 1 1 240px;
+    max-width: 340px;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 0.5rem 0.7rem;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.82rem;
+}
+.tabla-buscador:focus { outline: none; border-color: var(--accent-primary); }
+.tabla-conteo { font-size: 0.78rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+.btn-exportar {
+    margin-left: auto;
+    background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+    border: none;
+    border-radius: 8px;
+    color: #fff;
+    font-family: inherit;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 0.5rem 1.1rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.btn-exportar:hover { filter: brightness(1.1); }
+.btn-exportar:disabled { opacity: 0.6; cursor: default; filter: none; }
+
+/* Alto acotado con encabezado fijo: con miles de filas la pagina entera se
+   volveria inmanejable, y el encabezado tiene que seguir visible al bajar */
+.tabla-wrap { max-height: 460px; overflow: auto; border: 1px solid var(--card-border); border-radius: 10px; }
+
+.tabla-datos { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.tabla-datos thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #14141a;
+    color: var(--text-secondary);
+    font-weight: 600;
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    font-size: 0.68rem;
+    padding: 0.6rem 0.7rem;
+    border-bottom: 1px solid var(--card-border);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+}
+.tabla-datos thead th:hover { color: var(--text-primary); }
+.tabla-datos thead th.ordenada { color: var(--accent-secondary); }
+.tabla-datos td { padding: 0.45rem 0.7rem; border-bottom: 1px solid rgba(255, 255, 255, 0.05); white-space: nowrap; }
+.tabla-datos tbody tr:hover td { background: rgba(255, 255, 255, 0.045); }
+.tabla-datos .col-num { text-align: right; }
+.tabla-datos .tabla-vacia { text-align: center; color: var(--text-secondary); padding: 2rem 0.7rem; white-space: normal; }
+.celda-num { font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: 0.4rem; justify-content: flex-end; }
+
+/* El punto usa la misma escala de criticidad del mapa de calor */
+.punto-crit { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+
+/* Morado para la proteccion, el mismo que en los dos mapas */
+.pill-prot { color: #c084fc; font-weight: 700; }
+.pill-no { color: var(--text-secondary); }
+
+/* El error de localizacion se destaca cuando supera a la distancia medida: en
+   esos casos el "cayo a 20 m" no se puede sostener */
+.error-domina { color: var(--warning); }
+.error-ok { color: var(--text-secondary); }
+
+/* ---- Calendario mensual ---- */
+/* position: relative porque la mini tarjeta del dia se posiciona contra esta
+   caja (coordenadas absolutas calculadas en posicionarTarjetaDia) */
+.calendario-card { padding: 1.25rem; display: flex; flex-direction: column; gap: 0.8rem; position: relative; }
+
+.cal-barra { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.cal-nav { display: flex; align-items: center; gap: 0.5rem; }
+.cal-nav button {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 1.2rem;
+    line-height: 1;
+    width: 34px; height: 34px;
+    cursor: pointer;
+}
+.cal-nav button:hover { border-color: var(--accent-primary); }
+.cal-select {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 0.45rem 0.6rem;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+.cal-select:focus { outline: none; border-color: var(--accent-primary); }
+.cal-select option { background: var(--bg-color); }
+
+.cal-escala { display: flex; align-items: center; gap: 0.6rem; font-size: 0.75rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.cal-escala-titulo { color: var(--text-primary); font-weight: 600; }
+.cal-escala .heat-bar { width: 120px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #fee2e2 0%, #f87171 50%, var(--accent-primary) 100%); }
+.cal-nota { font-size: 0.78rem; color: var(--text-secondary); }
+
+/* Siete columnas fijas: la semana va de lunes a domingo */
+.cal-grilla { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; }
+.cal-grilla.cargando { opacity: 0.45; pointer-events: none; }
+
+.cal-cabecera {
+    text-align: center;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    padding-bottom: 0.3rem;
+}
+.cal-vacio { min-height: 94px; }
+
+.cal-dia {
+    position: relative;
+    min-height: 94px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 0.5rem 0.5rem 0.65rem;
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--text-secondary);
+    font-family: inherit;
+    cursor: pointer;
+    text-align: center;
+    transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.cal-dia:hover { border-color: rgba(255, 255, 255, 0.35); transform: translateY(-1px); }
+.cal-dia.activo { color: #fff; border-color: transparent; box-shadow: 0 6px 16px -8px rgba(201, 0, 22, 0.6); }
+.cal-dia.activo:hover { border-color: rgba(255, 255, 255, 0.55); }
+/* La escala va de pastel (t bajo) a rojo intenso (t alto): sobre el pastel
+   el texto blanco no contrasta, asi que se oscurece */
+.cal-dia.texto-oscuro { color: #1a1a1f; }
+.cal-dia.texto-oscuro .cal-num { opacity: 0.65; }
+
+.cal-num { align-self: flex-start; font-size: 0.72rem; font-weight: 700; opacity: 0.8; }
+
+/* Ocupa el espacio restante de la celda para que el numero quede centrado, sin
+   importar si el numero del dia de arriba tiene uno o dos digitos. En la
+   casilla va solo el conteo de descargas: el resto lo cuenta la mini tarjeta */
+.cal-datos { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+.cal-rayos { font-size: 1.6rem; font-weight: 800; line-height: 1.1; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 900px) {
+    .cal-dia, .cal-vacio { min-height: 66px; }
+    .cal-rayos { font-size: 1.15rem; }
+}
+
+.cal-dia.seleccionado { box-shadow: 0 0 0 2px #fff, 0 6px 16px -8px rgba(201, 0, 22, 0.6); }
+
+/* ---- Mini tarjeta del dia ----
+   Flota sobre el calendario, pegada a la casilla. Al pasar el cursor es solo
+   lectura; al hacer clic queda fija y aparecen los botones. pointer-events:none
+   en el modo hover es clave: sin eso la tarjeta se mete bajo el cursor, la
+   casilla pierde el hover y la tarjeta parpadea sin parar. */
+.cal-tarjeta {
+    position: absolute;
+    z-index: 20;
+    width: 208px;
+    padding: 0.7rem 0.8rem 0.8rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    background: rgba(18, 18, 22, 0.97);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 12px;
+    box-shadow: 0 12px 30px -8px rgba(0, 0, 0, 0.75);
+    pointer-events: none;
+}
+.cal-tarjeta.fija {
+    pointer-events: auto;
+    border-color: rgba(255, 255, 255, 0.3);
+}
+
+.cal-tarjeta-cabeza { display: flex; align-items: center; justify-content: space-between; gap: 0.4rem; }
+.cal-tarjeta-fecha {
+    font-size: 0.74rem; font-weight: 700; color: var(--text-primary);
+    text-transform: uppercase; letter-spacing: 0.04em;
+}
+/* Los botones solo tienen sentido con la tarjeta fija: en el hover no se pueden
+   ni alcanzar con el raton */
+.cal-tarjeta-acciones { display: none; gap: 0.25rem; }
+.cal-tarjeta.fija .cal-tarjeta-acciones { display: flex; }
+.cal-tarjeta-btn {
+    background: transparent;
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    line-height: 1;
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    padding: 0;
+}
+.cal-tarjeta-btn:hover { border-color: rgba(255, 255, 255, 0.4); color: var(--text-primary); }
+
+.cal-tarjeta-datos { display: flex; flex-direction: column; gap: 0.28rem; margin: 0; }
+.cal-tarjeta-datos > div {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem;
+}
+.cal-tarjeta-datos dt { font-size: 0.68rem; color: var(--text-secondary); }
+.cal-tarjeta-datos dd {
+    margin: 0;
+    font-size: 0.82rem; font-weight: 700; color: var(--text-primary);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+/* El mini grafico va mas bajo que el del panel viejo: es una silueta de la
+   jornada, no un grafico para leer valores */
+.cal-tarjeta-horas { height: 44px; gap: 2px; }
+.cal-tarjeta-horas .cal-hora-relleno { max-width: 6px; }
+
+.cal-horas { display: flex; align-items: flex-end; gap: 3px; height: 80px; }
+.cal-hora-barra { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 3px; }
+.cal-hora-relleno { width: 100%; max-width: 12px; background: rgba(255, 255, 255, 0.18); border-radius: 2px 2px 0 0; }
+.cal-hora-barra.pico .cal-hora-relleno { background: var(--accent-primary); }
+/* Alto fijo aunque quede vacia: un <span> sin texto no reserva su propio alto
+   solo, y sin esto las barras sin numero de hora quedan mas abajo que las
+   que si lo tienen */
+.cal-hora-etiqueta { flex-shrink: 0; height: 10px; font-size: 0.55rem; line-height: 10px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+
+/* Un tag de estructura puede ser largo ("TSE-TIE21 Y TSE-TIE22"): en la tarjeta
+   de KPI se recorta y el nombre completo queda en el tooltip */
+.kpi-value-tag { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- Simulador de tormenta ---- */
+.sim-barra { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.sim-dia-nav { display: flex; align-items: center; gap: 0.5rem; }
+.sim-dia-nav button {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 1.2rem;
+    line-height: 1;
+    width: 34px; height: 34px;
+    cursor: pointer;
+}
+.sim-dia-nav button:hover { border-color: var(--accent-primary); }
+.sim-dia-nav button:disabled { opacity: 0.4; cursor: default; border-color: var(--card-border); }
+.sim-fecha {
+    /* Ancho suficiente para el dia mas largo ("Miércoles 30 de Septiembre,
+       2024") sin que se corte */
+    width: 305px;
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 0.5rem 0.7rem;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+}
+.sim-fecha:focus { outline: none; border-color: var(--accent-primary); }
+
+/* Las tarjetas son hermanas del panel del mapa, no hijas suyas. El gap de
+   .datos-section es 1rem y aca se le suma un pelo para dejar los mismos
+   1.15rem que .main-content pone entre los KPIs y el mapa en las otras vistas */
+.sim-kpis { margin-bottom: 0.15rem; }
+
+/* Layout mapa + tabla lateral. El alto de .sim-cuerpo lo fija JS
+   (ajustarAlturaSimCuerpo, hasta el fondo de la ventana), asi que aca el
+   "stretch" por defecto ya no infla nada en circulo: el mapa y la tabla
+   simplemente se reparten esa altura fija, y quien no entra usa su scroll */
+.sim-cuerpo { display: flex; gap: 0.85rem; min-height: 0; }
+.sim-mapa-col { flex: 1 1 auto; display: flex; flex-direction: column; gap: 0.85rem; min-width: 0; min-height: 0; }
+.sim-tabla-col {
+    flex: 0 0 320px;
+    display: flex; flex-direction: column;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    overflow: hidden;
+    min-height: 0;
+}
+.sim-tabla-cabeza {
+    padding: 0.65rem 0.8rem;
+    font-size: 0.72rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--card-border);
+}
+.sim-tabla-cuerpo { flex: 1; overflow-y: auto; min-height: 0; }
+.sim-tabla-vacia { padding: 1rem 0.8rem; font-size: 0.78rem; color: var(--text-secondary); line-height: 1.4; }
+
+/* Tabla cronologica de descargas */
+.sim-tabla { width: 100%; border-collapse: collapse; font-size: 0.7rem; }
+.sim-tabla thead th {
+    position: sticky; top: 0; z-index: 1;
+    background: #14141a; color: var(--text-secondary);
+    font-weight: 600; text-align: left; text-transform: uppercase;
+    font-size: 0.6rem; letter-spacing: 0.02em;
+    padding: 0.45rem 0.4rem; border-bottom: 1px solid var(--card-border); white-space: nowrap;
+}
+.sim-tabla td { padding: 0.34rem 0.4rem; border-bottom: 1px solid rgba(255, 255, 255, 0.05); white-space: nowrap; }
+.sim-tabla tbody tr { cursor: pointer; }
+.sim-tabla tbody tr:hover td { background: rgba(255, 255, 255, 0.05); }
+.sim-tabla tr.activa td { background: rgba(201, 0, 22, 0.25); }
+.sim-tabla .st-num { text-align: right; font-variant-numeric: tabular-nums; }
+.sim-tabla .st-hora { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.sim-tabla .st-pol { text-align: center; font-weight: 800; }
+.sim-tabla .st-pol.pos { color: #f87171; }
+.sim-tabla .st-pol.neg { color: #60a5fa; }
+.sim-tabla .st-est { max-width: 96px; overflow: hidden; text-overflow: ellipsis; }
+
+@media (max-width: 900px) {
+    .sim-cuerpo { flex-direction: column; }
+    .sim-tabla-col { flex-basis: auto; max-height: 240px; }
+}
+
+#simMap { width: 100%; height: auto; min-height: var(--mapa-min); border-radius: 12px; z-index: 1; flex-grow: 1; }
+
+/* Capa de animacion de rayos: encima del mapa pero transparente al puntero,
+   para no robarle el arrastre y el zoom al mapa de abajo */
+.sim-canvas { position: absolute; inset: 0; pointer-events: none; z-index: 400; border-radius: 12px; }
+
+/* Indicador de clima actual sobre el mapa */
+.sim-clima {
+    position: absolute;
+    /* Debajo de los botones +/- de zoom de Leaflet (arriba-izquierda), para
+       que no se superpongan */
+    top: 82px; left: 12px;
+    z-index: 500;
+    display: flex; align-items: center; gap: 0.35rem;
+    padding: 0.35rem 0.7rem;
+    border-radius: 999px;
+    background: rgba(10, 10, 12, 0.72);
+    border: 1px solid var(--card-border);
+    backdrop-filter: blur(6px);
+    font-size: 0.8rem; font-weight: 700;
+    color: var(--text-primary);
+    pointer-events: none;
+    transition: background 0.4s ease, border-color 0.4s ease;
+}
+.sim-clima.lluvia { background: rgba(30, 41, 59, 0.78); border-color: rgba(148, 163, 184, 0.4); }
+.sim-clima.tormenta { background: rgba(15, 18, 32, 0.85); border-color: rgba(201, 0, 22, 0.5); }
+
+/* Controles compactos para darle todo el ancho posible a la barra de tiempo */
+.sim-controles { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.sim-play, .sim-btn {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    color: var(--text-primary);
+    line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+/* Play y reinicio: mismo tamaño y compactos */
+.sim-play, .sim-btn { width: 32px; height: 32px; font-size: 0.9rem; }
+.sim-play:hover, .sim-btn:hover { border-color: var(--accent-primary); }
+.sim-play:disabled, .sim-btn:disabled { opacity: 0.4; cursor: default; border-color: var(--card-border); }
+.sim-play.reproduciendo { background: var(--accent-primary); border-color: var(--accent-primary); }
+/* min-width fijo para que el reloj no baile de ancho al pasar los segundos.
+   Da para el caso mas largo: "31 ago 00:00:00" */
+.sim-reloj { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 0.9rem; min-width: 124px; text-align: center; flex-shrink: 0; }
+
+/* Periodo que abarca la simulacion: arriba donde arranca, abajo donde termina.
+   El reloj de al lado es otra cosa (el instante que se esta reproduciendo), y
+   al empezar mostraba la fecha de inicio: parecia que el rango era de un dia */
+.sim-periodo {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex-shrink: 0;
+    padding-left: 0.6rem;
+    border-left: 1px solid var(--card-border);
+    font-size: 0.66rem;
+    line-height: 1.3;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.sim-periodo-fila { display: flex; align-items: baseline; gap: 0.4rem; }
+.sim-periodo-et {
+    min-width: 32px;
+    color: var(--text-secondary);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.58rem;
+}
+.sim-periodo-val { color: var(--text-primary); font-weight: 600; }
+
+/* La barra de tiempo: histograma de actividad de fondo con el cabezal de
+   reproduccion, dibujados sobre el canvas. Ocupa todo el ancho sobrante */
+.sim-timeline { position: relative; flex: 1 1 340px; min-width: 200px; height: 46px; cursor: pointer; }
+.sim-timeline canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+.sim-select {
+    background: rgba(0, 0, 0, 0.25);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 0.35rem 0.4rem;
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+.sim-select:focus { outline: none; border-color: var(--accent-primary); }
+.sim-select option { background: var(--bg-color); }
+
+/* Custom Scrollbar */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }

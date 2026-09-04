@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Descargas Atmosféricas</title>
+    
+    <!-- Fuentes -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+
+    <!-- Flatpickr CSS (calendario con días marcados) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
+
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="background-elements">
+        <div class="glow-orb orb-1"></div>
+        <div class="glow-orb orb-2"></div>
+        <div class="glow-orb orb-3"></div>
+    </div>
+
+    <div id="introScreen" class="intro-screen">
+        <div class="welcome-card">
+            <div class="landing-logos">
+                <img src="/static/LOGO-GEOPARK-NEGATIVO.png" alt="GeoPark" class="brand-logo">
+            </div>
+            <h1>Monitor de Descargas Atmosféricas</h1>
+            <h3 style="color: var(--accent-primary); margin-bottom: 2.5rem;">Campo Llanos 34</h3>
+            <button id="btnIniciarApp" class="btn-primary" style="font-size: 1.2rem; padding: 1.2rem;">INICIAR SISTEMA</button>
+        </div>
+    </div>
+
+    <div class="dashboard-layout" id="appContainer" style="display: none;">
+        
+        <!-- SIDEBAR -->
+        <aside class="sidebar glass-card">
+            <div class="brand">
+                <h1 class="brand-titulo">Análisis Espacial Avanzado</h1>
+            </div>
+
+            <form id="uploadForm">
+                
+                <fieldset class="filter-group">
+                    <legend>Ubicación</legend>
+
+                    <div class="options-wrapper">
+                        <label for="filtroCampo">Campo</label>
+                        <select id="filtroCampo" class="form-select">
+                            <option value="">TODOS</option>
+                        </select>
+                    </div>
+
+                    <div class="options-wrapper">
+                        <label for="filtroLocacion">Locación / Circuito</label>
+                        <select id="filtroLocacion" class="form-select">
+                            <option value="">TODOS</option>
+                        </select>
+                    </div>
+
+                    <div class="options-wrapper">
+                        <label for="filtroPortico">Pórtico / SWG / Tramo</label>
+                        <select id="filtroPortico" class="form-select">
+                            <option value="">TODOS</option>
+                        </select>
+                    </div>
+
+                    <div class="options-wrapper">
+                        <label for="filtroEstructura">Estructura Específica</label>
+                        <div class="buscador" id="buscadorEstructura">
+                            <input type="text" id="filtroEstructura" class="buscador-input"
+                                   placeholder="Escribe un tag, ej. JCB-TIE"
+                                   autocomplete="off" role="combobox" aria-expanded="false"
+                                   aria-autocomplete="list" aria-controls="listaEstructuras">
+                            <button type="button" id="limpiarEstructura" class="buscador-limpiar"
+                                    title="Quitar la estructura seleccionada" hidden>×</button>
+                            <ul id="listaEstructuras" class="buscador-lista" role="listbox" hidden></ul>
+                        </div>
+                        <p class="buscador-nota" id="notaEstructura"></p>
+                    </div>
+                </fieldset>
+
+                <fieldset class="filter-group">
+                    <legend>Parámetros de análisis</legend>
+
+                    <div class="options-wrapper">
+                        <label for="radioBusqueda">Radio de búsqueda (metros)</label>
+                        <!-- Sin step: con step="10" y min="1" el navegador solo acepta
+                             1, 11, 21... y rechazaba valores tan normales como 100.
+                             El máximo lo impone también el backend (RADIO_MAXIMO_METROS):
+                             por encima de 5.000 m el cruce espacial agota la memoria. -->
+                        <input type="number" id="radioBusqueda" value="100" min="1" max="5000"
+                               title="Entre 1 y 5.000 metros" required>
+                        <p class="buscador-nota">Entre 1 y 5.000 m</p>
+                    </div>
+
+                    <div class="options-wrapper">
+                        <label for="fechaInicio">Fecha inicial</label>
+                        <input type="date" id="fechaInicio">
+                    </div>
+
+                    <div class="options-wrapper">
+                        <label for="fechaFin">Fecha final</label>
+                        <input type="date" id="fechaFin">
+                    </div>
+
+                    <div class="date-legend" id="dateLegend">
+                        <span class="legend-row"><span class="day-swatch impacto-radio"></span> Descargas afectando estructuras</span>
+                        <span class="legend-row"><span class="day-swatch has-data"></span> Descargas sin afectar estructuras</span>
+                        <span class="legend-row"><span class="day-swatch no-data"></span> Días sin descargas registradas</span>
+                    </div>
+                </fieldset>
+
+                <button type="submit" class="btn-primary" id="btnSubmit">
+                    <span>Analizar datos</span>
+                    <div class="spinner" id="spinner" style="display: none;"></div>
+                </button>
+            </form>
+            <div id="statusMessage" class="status-message"></div>
+        </aside>
+
+        <!-- MAIN DASHBOARD CONTENT -->
+        <main class="main-content" id="dashboardContent" style="display: none;">
+
+            <!-- Cambio de vista + logo de la empresa a la derecha, al nivel de las pestañas -->
+            <div class="dashboard-header">
+                <nav class="vista-tabs" role="tablist">
+                    <button type="button" class="vista-tab activa" id="tabMapa"
+                            role="tab" aria-selected="true" aria-controls="vistaMapa">Mapa</button>
+                    <button type="button" class="vista-tab" id="tabDatos"
+                            role="tab" aria-selected="false" aria-controls="vistaDatos">Datos</button>
+                    <button type="button" class="vista-tab" id="tabCalendario"
+                            role="tab" aria-selected="false" aria-controls="vistaCalendario">Calendario</button>
+                    <button type="button" class="vista-tab" id="tabSimulador"
+                            role="tab" aria-selected="false" aria-controls="vistaSimulador">Simulador de Tormenta</button>
+                </nav>
+                <img src="/static/LOGO-GEOPARK-NEGATIVO.png" alt="GeoPark" class="header-logo">
+            </div>
+
+            <!-- KPIs -->
+            <section class="kpi-grid">
+                <div class="kpi-card glass-card">
+                    <h3>Estructuras Analizadas</h3>
+                    <p class="kpi-value" id="kpiTotalEstructuras">0</p>
+                </div>
+                <div class="kpi-card glass-card">
+                    <h3>Estructuras Impactadas</h3>
+                    <p class="kpi-value highlight-error" id="kpiAfectadas">0</p>
+                </div>
+                <div class="kpi-card glass-card" title="Porcentaje de las descargas del período que cayeron dentro del radio de búsqueda de alguna estructura">
+                    <h3>Tasa de Exposición</h3>
+                    <p class="kpi-value" id="kpiTasaExposicion">0</p>
+                </div>
+                <div class="kpi-card glass-card">
+                    <h3>Total de Descargas en el Radio (<span id="kpiRadio"></span> <span class="kpi-unidad">m</span>)</h3>
+                    <p class="kpi-value highlight-warning" id="kpiTotalRayos">0</p>
+                </div>
+                <div class="kpi-card glass-card">
+                    <h3>Total de Descargas en el campo</h3>
+                    <p class="kpi-value" id="kpiRayosRango">0</p>
+                </div>
+            </section>
+
+            <!-- MAPA -->
+            <section class="map-section glass-card" id="vistaMapa" role="tabpanel" aria-labelledby="tabMapa">
+                <div class="map-header">
+                    <h2>Vista Satelital</h2>
+                    <div class="map-controls">
+                        <label>
+                            <input type="radio" name="mapMode" value="general" checked> Mapa General
+                        </label>
+                        <label>
+                            <input type="radio" name="mapMode" value="heatmap"> Mapa de Calor
+                        </label>
+                    </div>
+                </div>
+                <!-- Leyenda -->
+                <div class="map-legend">
+                    <!-- El color de cada opción es a la vez el filtro y la
+                         leyenda del mapa, por eso no hay indicadores aparte.
+                         Solo aplica al Mapa General: en el de calor se oculta -->
+                    <span class="legend-item legend-proteccion" id="filtrosProteccion">
+                        <label title="Todas las estructuras: azules las desprotegidas, moradas las protegidas">
+                            Todos
+                            <input type="radio" name="filtroProteccion" value="" checked>
+                            <span class="dot dot-todos"></span>
+                        </label>
+
+                        <span class="legend-sep"></span>
+
+                        <label title="Solo las estructuras sin ninguna protección">
+                            Estructuras
+                            <input type="radio" name="filtroProteccion" value="sin">
+                            <span class="dot dot-estructuras"></span>
+                        </label>
+
+                        <span class="legend-sep"></span>
+
+                        <label title="Solo los pórticos de derivación">
+                            Pórticos
+                            <input type="radio" name="filtroProteccion" value="porticos">
+                            <span class="dot dot-porticos"></span>
+                        </label>
+
+                        <span class="legend-sep"></span>
+
+                        <label title="Solo las estructuras con DPS o DSD">
+                            DPS/DSD
+                            <input type="radio" name="filtroProteccion" value="protegidas">
+                            <span class="dot dot-protegidas"></span>
+                        </label>
+
+                        <span class="legend-sep"></span>
+
+                        <span class="subfiltros" id="subfiltrosProteccion">
+                            <label title="Dentro de las protegidas, solo las que tienen DPS">
+                                DPS
+                                <input type="checkbox" id="subDps">
+                                <span class="dot dot-dps"></span>
+                            </label>
+                            <label title="Dentro de las protegidas, solo las que tienen DSD">
+                                DSD
+                                <input type="checkbox" id="subDsd">
+                                <span class="dot dot-dsd"></span>
+                            </label>
+                        </span>
+                    </span>
+
+                    <span class="legend-sep"></span>
+
+                    <span class="legend-item legend-portico">
+                        <span class="sw-rombo"></span> Pórtico
+                    </span>
+
+                    <span class="legend-item legend-corriente" id="leyendaCorriente">
+                        <span class="legend-titulo">Corriente del rayo</span>
+                        <span id="corrienteMin">0</span>
+                        <span class="corriente-bar"></span>
+                        <span><span id="corrienteMax">0</span> kA</span>
+                    </span>
+                </div>
+
+                <div class="heat-legend" id="heatLegend" style="display: none;">
+                    <span class="heat-label">Criticidad de estructuras</span>
+                    <span class="heat-min"><span id="heatMin">0</span></span>
+                    <span class="heat-bar"></span>
+                    <span class="heat-max"><span id="heatMax">0</span> impactos</span>
+
+                    <span class="legend-sep"></span>
+
+                    <span class="heat-item"><span class="ring-demo"></span> Con DPS/DSD</span>
+
+                    <span class="legend-sep"></span>
+
+                    <span class="heat-umbral">
+                        <label for="umbralImpactos">Mínimo</label>
+                        <input type="range" id="umbralImpactos" min="0" max="1" value="0" step="1">
+                        <output id="umbralValor">todas</output>
+                    </span>
+
+                    <span class="legend-sep"></span>
+
+                    <span class="heat-umbral">
+                        <label for="opacidadCalor">Mancha</label>
+                        <input type="range" id="opacidadCalor" min="0" max="100" value="80" step="5">
+                        <output id="opacidadValor">80 %</output>
+                    </span>
+                </div>
+
+                <div class="map-wrap">
+                    <div id="map"></div>
+
+                    <aside class="top-panel" id="topPanel" style="display: none;">
+                        <header>
+                            <span>Estructuras más afectadas</span>
+                            <button type="button" id="topToggle" aria-expanded="true" aria-controls="topLista" title="Contraer u expandir">−</button>
+                        </header>
+                        <ol id="topLista"></ol>
+                    </aside>
+
+                    <aside class="detalle-panel" id="detallePanel" hidden>
+                        <header>
+                            <span id="detalleTag">Estructura</span>
+                            <button type="button" id="detalleCerrar" title="Cerrar el detalle">×</button>
+                        </header>
+                        <div id="detalleCuerpo"></div>
+                    </aside>
+                </div>
+            </section>
+
+            <!-- VISTA DE DATOS -->
+            <section class="datos-section" id="vistaDatos" role="tabpanel" aria-labelledby="tabDatos" hidden>
+
+                <div class="glass-card grafica-card">
+                    <h2>Distribución de Corriente (kA)</h2>
+                    <p class="grafica-nota" id="graficaNota"></p>
+
+                    <!-- La grafica lleva su leyenda vertical adentro, a la
+                         derecha; las medidas van en otra columna mas afuera
+                         para no encimarse con ella -->
+                    <div class="grafica-layout">
+                        <div class="grafica-wrap">
+                            <canvas id="graficaCorriente"></canvas>
+                        </div>
+
+                        <aside class="grafica-lateral">
+                            <!-- Leyenda propia en vez de la de Chart.js: cada
+                                 muestra imita el trazo real de su serie y el
+                                 texto no repite los valores, que van debajo -->
+                            <ul class="grafica-leyenda">
+                                <li><span class="sw sw-barra"></span> Distribución</li>
+                                <li><span class="sw sw-gauss"></span> Campana gaussiana</li>
+                                <li><span class="sw sw-media"></span> Media</li>
+                                <li><span class="sw sw-mediana"></span> Mediana</li>
+                                <li><span class="sw sw-p99"></span> Percentil 99</li>
+                            </ul>
+
+                            <div class="medidas-col">
+                                <div class="medida">
+                                    <h3>Media</h3>
+                                    <p class="medida-valor" id="medidaMedia">—</p>
+                                </div>
+                                <div class="medida">
+                                    <h3>Mediana</h3>
+                                    <p class="medida-valor" id="medidaMediana">—</p>
+                                </div>
+                                <div class="medida">
+                                    <h3>Percentil 99</h3>
+                                    <p class="medida-valor" id="medidaP99">—</p>
+                                </div>
+                            </div>
+                        </aside>
+                    </div>
+                </div>
+
+                <div class="glass-card tablas-card">
+                    <nav class="tabla-tabs" role="tablist">
+                        <button type="button" class="tabla-tab activa" data-tabla="estructuras">Estructuras</button>
+                        <button type="button" class="tabla-tab" data-tabla="rayos">Rayos</button>
+                        <button type="button" class="tabla-tab" data-tabla="circuito">Por circuito</button>
+                        <button type="button" class="tabla-tab" data-tabla="campo">Por campo</button>
+                    </nav>
+
+                    <div class="tabla-barra">
+                        <input type="search" id="buscadorTabla" class="tabla-buscador"
+                               placeholder="Buscar en la tabla…" autocomplete="off">
+                        <span class="tabla-conteo" id="tablaConteo"></span>
+
+                        <button type="button" class="btn-exportar" id="btnExportar"
+                                title="Descarga las cuatro tablas y el resumen en un Excel, con los filtros que están aplicados">
+                            Descargar informe
+                        </button>
+                    </div>
+
+                    <div class="tabla-wrap">
+                        <table class="tabla-datos" id="tablaDatos">
+                            <thead id="tablaCabeza"></thead>
+                            <tbody id="tablaCuerpo"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- VISTA DE CALENDARIO -->
+            <section class="datos-section" id="vistaCalendario" role="tabpanel" aria-labelledby="tabCalendario" hidden>
+
+                <!-- El detalle de cada día vive en la mini tarjeta flotante de
+                     abajo; estas tarjetas solo resumen el MES completo. -->
+                <section class="kpi-grid cal-resumen-mes" id="calResumenMes">
+                    <div class="kpi-card glass-card" title="Estructuras distintas con al menos una descarga dentro del radio este mes">
+                        <h3>Estructuras Impactadas</h3>
+                        <p class="kpi-value" id="calCardEstructuras">0</p>
+                    </div>
+                    <div class="kpi-card glass-card" title="El día del mes con más descargas dentro del radio">
+                        <h3>Día Más Crítico</h3>
+                        <p class="kpi-value highlight-error" id="calCardPeorDia">—</p>
+                        <span class="kpi-sub" id="calCardPeorDiaSub"></span>
+                    </div>
+                    <div class="kpi-card glass-card" title="Días del mes con al menos una descarga dentro del radio">
+                        <h3>Días con Actividad</h3>
+                        <p class="kpi-value" id="calCardDias">—</p>
+                        <span class="kpi-sub" id="calCardDiasSub"></span>
+                    </div>
+                    <div class="kpi-card glass-card" title="La estructura impactada en más días distintos del mes">
+                        <h3>Estructura Más Expuesta</h3>
+                        <p class="kpi-value kpi-value-tag" id="calCardExpuesta">—</p>
+                        <span class="kpi-sub" id="calCardExpuestaSub"></span>
+                    </div>
+                </section>
+
+                <div class="glass-card calendario-card">
+                    <div class="cal-barra">
+                        <div class="cal-nav">
+                            <button type="button" id="calAnterior" title="Mes anterior">‹</button>
+                            <select id="calMes" class="cal-select"></select>
+                            <select id="calAnio" class="cal-select"></select>
+                            <button type="button" id="calSiguiente" title="Mes siguiente">›</button>
+                        </div>
+
+                        <span class="cal-escala" id="calEscala">
+                            <span class="cal-escala-titulo">Descargas en el radio</span>
+                            <span id="calMin">0</span>
+                            <span class="heat-bar"></span>
+                            <span id="calMax">0</span>
+                        </span>
+                    </div>
+
+                    <p class="cal-nota" id="calNota"></p>
+
+                    <div class="cal-grilla" id="calGrilla"></div>
+
+                    <!-- Mini tarjeta del día: se asoma al pasar el cursor por una
+                         casilla con datos y queda fija al hacer clic. Vive dentro
+                         de .calendario-card porque se posiciona con coordenadas
+                         relativas a ella. -->
+                    <div class="cal-tarjeta" id="calTarjeta" hidden>
+                        <div class="cal-tarjeta-cabeza">
+                            <span class="cal-tarjeta-fecha" id="calTjFecha"></span>
+                            <span class="cal-tarjeta-acciones">
+                                <button type="button" class="cal-tarjeta-btn" id="calTjMapa"
+                                        title="Ver este día en el mapa" aria-label="Ver este día en el mapa">⊕</button>
+                                <button type="button" class="cal-tarjeta-btn" id="calTjCerrar"
+                                        title="Cerrar" aria-label="Cerrar">✕</button>
+                            </span>
+                        </div>
+
+                        <dl class="cal-tarjeta-datos">
+                            <div><dt>Descargas</dt><dd id="calTjRayos">0</dd></div>
+                            <div><dt>Estructuras impactadas</dt><dd id="calTjEstr">0</dd></div>
+                            <div><dt>Hora pico</dt><dd id="calTjHora">—</dd></div>
+                            <div><dt>Corriente máxima</dt><dd id="calTjCorriente">—</dd></div>
+                        </dl>
+
+                        <div class="cal-horas cal-tarjeta-horas" id="calTjHoras"></div>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- SIMULADOR DE TORMENTA -->
+            <!-- Las tarjetas van FUERA del panel del mapa, igual que en Mapa,
+                 Datos y Calendario: dentro quedaban sobre una segunda capa de
+                 vidrio y se veían distintas al resto del tablero. -->
+            <section class="datos-section" id="vistaSimulador" role="tabpanel" aria-labelledby="tabSimulador" hidden>
+
+                <!-- Tarjetas del período. El período se elige en
+                     "Parámetros de análisis" del sidebar. -->
+                <section class="kpi-grid sim-kpis">
+                    <div class="kpi-card glass-card">
+                        <h3>Día crítico</h3>
+                        <p class="kpi-value" id="simKpiDia">—</p>
+                    </div>
+                    <!-- La hora pico no se busca dentro del día pico: es la franja
+                         horaria con más descargas de todo el rango, así que puede
+                         caer en otro día. Por eso lleva su propia fecha debajo. -->
+                    <div class="kpi-card glass-card">
+                        <h3>Hora crítica</h3>
+                        <p class="kpi-value" id="simKpiHora">—</p>
+                        <span class="kpi-sub" id="simKpiHoraSub"></span>
+                    </div>
+                    <!-- La descarga más intensa tampoco tiene por qué caer en el
+                         día crítico ni en la hora crítica: lleva su propia fecha. -->
+                    <div class="kpi-card glass-card">
+                        <h3>Corriente Máxima</h3>
+                        <p class="kpi-value" id="simKpiCorriente">—</p>
+                        <span class="kpi-sub" id="simKpiCorrienteSub"></span>
+                    </div>
+                    <div class="kpi-card glass-card">
+                        <h3>Total de Descargas en el Radio (<span id="simKpiRadioValor"></span> <span class="kpi-unidad">m</span>)</h3>
+                        <p class="kpi-value highlight-warning" id="simKpiRadio">0</p>
+                    </div>
+                    <div class="kpi-card glass-card">
+                        <h3>Total de Descargas en el Campo</h3>
+                        <p class="kpi-value" id="simKpiRegion">0</p>
+                    </div>
+                </section>
+
+                <!-- Panel del mapa: la caja de vidrio, hermana de las tarjetas -->
+                <div class="map-section glass-card" id="simPanel">
+                    <div class="sim-cuerpo">
+                        <div class="sim-mapa-col">
+                            <div class="map-wrap">
+                                <div id="simMap"></div>
+                                <canvas id="simCanvas" class="sim-canvas"></canvas>
+                                <div class="sim-clima despejado" id="simClima" data-clima="despejado">☀️ Despejado</div>
+                            </div>
+
+                            <div class="sim-controles">
+                                <button type="button" id="simPlay" class="sim-play" title="Reproducir" disabled>▶</button>
+                                <button type="button" id="simReiniciar" class="sim-btn" title="Volver al inicio del día" disabled>⟲</button>
+                                <span class="sim-reloj" id="simReloj">00:00:00</span>
+
+                                <!-- El reloj de arriba marca el instante que se está
+                                     reproduciendo; este bloque marca el período completo
+                                     que abarca la simulación, de principio a fin. -->
+                                <div class="sim-periodo" title="Período que abarca la simulación">
+                                    <span class="sim-periodo-fila">
+                                        <span class="sim-periodo-et">Desde</span>
+                                        <span class="sim-periodo-val" id="simPeriodoIni">—</span>
+                                    </span>
+                                    <span class="sim-periodo-fila">
+                                        <span class="sim-periodo-et">Hasta</span>
+                                        <span class="sim-periodo-val" id="simPeriodoFin">—</span>
+                                    </span>
+                                </div>
+
+                                <div class="sim-timeline" id="simTimeline" title="Clic o arrastrá para saltar a una hora">
+                                    <canvas id="simDensidad"></canvas>
+                                </div>
+                                <select id="simVelocidad" class="sim-select" title="Velocidad de reproducción">
+                                    <option value="0.5">0.5×</option>
+                                    <option value="1" selected>1×</option>
+                                    <option value="1.5">1.5×</option>
+                                    <option value="2">2×</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <aside class="sim-tabla-col">
+                            <div class="sim-tabla-cabeza">Cronología de descargas</div>
+                            <div class="sim-tabla-cuerpo" id="simTablaCuerpo">
+                                <p class="sim-tabla-vacia">Elegí un día con actividad para ver el detalle de cada descarga.</p>
+                            </div>
+                        </aside>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+
+    </div>
+
+    <!-- Scripts CDN -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://leaflet.github.io/Leaflet.heat/dist/leaflet-heat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/es.js"></script>
+
+    <!-- Chart.js para la vista de datos -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+    <!-- Script Local -->
+    <script src="/static/script.js"></script>
+</body>
+</html>

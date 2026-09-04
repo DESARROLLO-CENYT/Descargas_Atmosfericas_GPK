@@ -1,0 +1,13 @@
+services:
+  web:
+    build: .
+    ports:
+      - "8080:8000"
+    volumes:
+      - .:/app
+    environment:
+      - PORT=8000
+    # El volumen ya trae el codigo nuevo al contenedor, pero uvicorn lo carga
+    # una sola vez al arrancar: sin --reload se queda con el backend viejo en
+    # memoria mientras el frontend ya es el nuevo, y el tablero falla a medias.
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
