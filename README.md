@@ -65,69 +65,6 @@ El despliegue en Render **no** usa este archivo, sino el `Dockerfile`.
 
 ---
 
-## Despliegue en Render
-
-El repositorio trae un blueprint (`render.yaml`) con la configuración completa.
-
-1. En Render: **New → Blueprint** y conectar este repositorio.
-2. Revisar los valores marcados como `AJUSTAR` en `render.yaml` (nombre del
-   servicio, región, rama y plan).
-3. Desplegar. Cada push a la rama configurada redespliega solo.
-
-No hay variables de entorno que configurar: los datos viajan dentro de la imagen
-y Render inyecta el puerto en `$PORT`, que el `Dockerfile` ya usa.
-
-### Requisitos de recursos (medidos, no estimados)
-
-Medido dentro de un contenedor limitado a 512 MB, contra el historial completo:
-
-| Petición | Tiempo | Memoria |
-|---|---|---|
-| Arranque en frío | ~10 s | 120 MB |
-| Análisis de un mes, radio 1 km | 1,1 s | 174 MB |
-| Análisis del historial completo, radio 1 km | 1,9 s | 199 MB |
-| Análisis del historial completo, radio 5 km | 3,4 s | 222 MB |
-
-Imagen construida: **1,24 GB**.
-
-### Limitaciones del plan Free
-
-El plan Free de Render da 512 MB de RAM y 0,1 de CPU. Con eso:
-
-- **El servicio se suspende tras 15 minutos sin tráfico.** La primera visita
-  después de la suspensión tarda alrededor de un minuto en responder.
-- **Los tiempos de la tabla anterior se multiplican.** Se midieron en una
-  máquina de desarrollo; con 0,1 de CPU hay que contar con varias veces más.
-  Render corta las peticiones que superan los 100 segundos.
-- **Un solo worker.** Cada worker carga su propia copia del parquet y del árbol
-  espacial; con dos, el servicio se queda sin memoria. Está fijado en el
-  `Dockerfile` y no debe subirse sin cambiar de plan.
-
-Si el uso se vuelve cotidiano, el plan Starter elimina la suspensión y triplica
-la CPU sin cambiar nada del código.
-
-### Por qué el radio está limitado a 5.000 m
-
-`sklearn.neighbors.BallTree.query_radius` devuelve, por cada una de las 759
-estructuras, el arreglo con **todos** los rayos que caen dentro del radio. El
-costo crece con el área, es decir con el cuadrado del radio. Medido contra el
-historial completo en un contenedor de 512 MB:
-
-| Radio | Rayos devueltos | Memoria | Resultado |
-|---|---|---|---|
-| 1.000 m | 5.309 | 199 MB | 1,9 s |
-| 2.000 m | 9.683 | 236 MB | 2,1 s |
-| 5.000 m | 23.717 | 222 MB | 3,4 s |
-| 10.000 m | — | — | **el proceso muere (OOM, exit 137)** |
-
-Un radio de 10 km no devolvía un error: **tumbaba el servicio completo**. Por eso
-`RADIO_MAXIMO_METROS = 5000` en `backend/main.py` rechaza el valor con un HTTP
-400 antes de tocar el árbol espacial, y el campo del formulario tiene el mismo
-tope. El uso real del tablero va entre 100 y 1.000 m, así que el límite no
-estorba en la operación.
-
----
-
 ## Estructura del proyecto
 
 ```
@@ -146,30 +83,4 @@ estorba en la operación.
 └── MEJORAS_PENDIENTES.md
 ```
 
-### Endpoints
 
-| Método | Ruta | Devuelve |
-|---|---|---|
-| `GET` | `/` | El tablero |
-| `GET` | `/api/filtros` | Jerarquía de filtros y catálogo de estructuras |
-| `GET` | `/api/rango-fechas` | Primer y último día con datos, y los días con actividad |
-| `POST` | `/api/procesar` | Análisis principal: KPIs, estructuras y rayos del período |
-| `POST` | `/api/calendario` | Actividad diaria de un mes |
-| `POST` | `/api/simulador` | Rayos del rango con timestamp continuo, para la animación |
-| `POST` | `/api/dias-radio` | Días del histórico con impacto dentro del radio |
-| `POST` | `/api/exportar` | Informe en Excel del análisis en pantalla |
-
----
-
-## Notas de mantenimiento
-
-- **Las dependencias están fijadas** en `requirements.txt` a las versiones que
-  corren hoy. Para actualizar: subir la versión, reconstruir la imagen y probar
-  en local antes de desplegar.
-- **El frontend no se cachea.** El backend le cuelga a `script.js` y `styles.css`
-  un `?v=<fecha de modificación>` y manda `Cache-Control: no-store`, para que
-  nadie quede con medio tablero viejo después de un despliegue.
-- **Los cachés del backend se invalidan solos** cuando cambia la fecha de
-  modificación de los archivos de datos.
-- Las mejoras identificadas y todavía no implementadas están en
-  [`MEJORAS_PENDIENTES.md`](MEJORAS_PENDIENTES.md).
