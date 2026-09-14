@@ -1,0 +1,4 @@
+# Solo para desarrollo y pruebas (no entra a la imagen de Render)
+-r requirements.txt
+pytest==9.1.1
+httpx==0.28.1                  # lo usa el TestClient de FastAPI

@@ -31,3 +31,8 @@ env/
 .env.*
 *.log
 *.tmp
+
+# Pruebas y herramientas de desarrollo: la app en ejecucion no las usa
+tests/
+scripts/
+requirements-dev.txt

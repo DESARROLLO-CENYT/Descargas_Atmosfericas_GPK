@@ -87,16 +87,50 @@ El despliegue en Render **no** usa este archivo, sino el `Dockerfile`.
 
 ---
 
+## Pruebas
+
+Ninguna prueba se conecta a Supabase ni gasta egress: el papel de la base lo
+cumple un Supabase simulado sobre el parquet del repositorio.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests
+```
+
+Cubren la sincronización con la base (días nuevos, recargados o borrados, caídas
+y recuperación), que modo parquet y modo Supabase den respuestas idénticas byte a
+byte, las consultas sobre los datos en memoria y el script de actualización del
+parquet.
+
+Dos pruebas de carga se corren a mano:
+
+```bash
+python tests/prueba_carga.py http://127.0.0.1:8000 10
+```
+
+Con el servidor ya levantado, simula 10 usuarios usándolo a la vez sin pausas.
+
+```bash
+python tests/simular_render.py 10
+```
+
+Solo en Windows: levanta el servidor con 0,1 de CPU, como el plan Free de
+Render, corre la prueba de carga y reporta el pico de memoria contra los 512 MB.
+
+---
+
 ## Estructura del proyecto
 
 ```
 ├── backend/
 │   ├── main.py          API FastAPI: cruce espacial, filtros y endpoints
 │   ├── datos.py         Fuente de datos (parquet o Supabase) y sincronización
+│   ├── lectura_parquet.py  Lectura del parquet en un proceso aparte
 │   ├── db.py            Conexión de solo lectura a Supabase
 │   └── informe.py       Generación del informe en Excel
 ├── scripts/
 │   └── actualizar_parquet.py  Copia el Gold del pipeline como parquet de pruebas
+├── tests/               Pruebas (pytest) y pruebas de carga manuales
 ├── static/
 │   ├── index.html       Estructura del tablero (las cuatro vistas)
 │   ├── script.js        Toda la lógica del frontend
