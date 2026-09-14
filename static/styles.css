@@ -670,6 +670,42 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 .dashboard-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 .header-logo { max-height: 56px; width: auto; object-fit: contain; flex-shrink: 0; }
 
+/* Etiqueta de la fuente de datos, pegada al logo (margin-left: auto la lleva a
+   la derecha aunque la cabecera reparta el espacio entre sus hijos) */
+.fuente-datos {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.3rem 0.75rem;
+    border: 1px solid var(--card-border);
+    border-radius: 999px;
+    background: var(--card-bg);
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    white-space: nowrap;
+}
+.fuente-datos[hidden] { display: none; }
+.fuente-datos::before {
+    content: '';
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+}
+.fuente-datos[data-estado="ok"] { color: var(--success); }
+.fuente-datos[data-estado="prueba"] { color: #93c5fd; border-color: rgba(147, 197, 253, 0.35); }
+.fuente-datos[data-estado="respaldo"],
+.fuente-datos[data-estado="sin_conexion"] {
+    color: var(--warning);
+    border-color: rgba(245, 158, 11, 0.45);
+    background: rgba(245, 158, 11, 0.08);
+}
+@media (max-width: 900px) {
+    .fuente-datos { white-space: normal; }
+}
+
 /* ---- Conmutador de vistas Mapa / Datos ---- */
 .vista-tabs { display: flex; gap: 0.5rem; flex-shrink: 0; flex-wrap: wrap; }
 .vista-tab {

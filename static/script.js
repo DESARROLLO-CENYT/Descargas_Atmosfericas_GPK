@@ -59,6 +59,35 @@ document.addEventListener('DOMContentLoaded', () => {
     let estructuraSeleccionada = '';
     let porticosSinUbicacion = [];
 
+    // ---- Fuente de datos ----
+    // Etiqueta junto al logo con la fuente activa (parquet de prueba o base de
+    // datos) y la fecha del dato mas reciente, para que nunca se confundan datos
+    // de prueba con los de produccion. Se actualiza al cargar y despues de cada
+    // analisis; no consulta sola cada tanto, para no mantener despierto el
+    // servidor ni gastar consultas con la pestaña abierta sin uso.
+    const etiquetaFuente = document.createElement('span');
+    etiquetaFuente.className = 'fuente-datos';
+    etiquetaFuente.setAttribute('role', 'status');
+    etiquetaFuente.hidden = true;
+    document.querySelector('.dashboard-header .header-logo')?.before(etiquetaFuente);
+
+    async function actualizarFuenteDatos() {
+        try {
+            const resp = await fetch('/api/fuente-datos');
+            if (!resp.ok) return;
+            const fuente = await resp.json();
+            etiquetaFuente.textContent = fuente.mensaje;
+            etiquetaFuente.dataset.estado = fuente.estado;
+            etiquetaFuente.title = fuente.ultima_sincronizacion
+                ? `Última sincronización con la base: ${new Date(fuente.ultima_sincronizacion).toLocaleString('es-CO')}`
+                : '';
+            etiquetaFuente.hidden = fuente.estado === 'cargando';
+        } catch (error) {
+            console.error('No se pudo leer la fuente de datos:', error);
+        }
+    }
+    actualizarFuenteDatos();
+
     async function loadFiltros() {
         try {
             const response = await fetch('/api/filtros');
@@ -736,6 +765,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 mainContent.style.display = 'flex';
             } 
             renderDashboard(data);
+            actualizarFuenteDatos();
             // El resultado del analisis lo cuentan las tarjetas de KPI: repetirlo
             // en un cartel bajo los filtros era ruido. Solo se avisa lo que las
             // tarjetas no pueden mostrar (un problema con los datos o la peticion)
