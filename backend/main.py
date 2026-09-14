@@ -914,6 +914,70 @@ async def procesar_datos(
             content={"message": f"Error procesando datos: {str(e)}"}
         )
 
+def _descargas_mes_supabase(desde: date, hasta: date) -> pl.DataFrame:
+    filas = consultar(
+        """
+        SELECT fecha, hora::text, latitud::float8, longitud::float8, corriente_ka, polaridad
+        FROM public.gpk_descargas_atmosfericas_gold
+        WHERE fecha >= %(desde)s AND fecha <= %(hasta)s
+        ORDER BY fecha
+        """,
+        {"desde": desde, "hasta": hasta},
+    )
+    return pl.DataFrame(
+        filas,
+        schema={
+            "Fecha": pl.Date,
+            "Hora": pl.Utf8,
+            "Latitud": pl.Float64,
+            "Longitud": pl.Float64,
+            "Corriente_kA": pl.Float64,
+            "Polaridad_Descargas": pl.Utf8,
+        },
+        orient="row",
+    )
+
+
+def _comparacion_anios_supabase(mes: int) -> list[dict]:
+    """Total de descargas de ese mes en cada anio con datos, sin recorte
+    geografico. Se calcula en Postgres con GROUP BY: evita traer el historico
+    completo solo para contar filas por anio."""
+    filas = consultar(
+        """
+        SELECT anio, COUNT(*) AS n
+        FROM public.gpk_descargas_atmosfericas_gold
+        WHERE mes = %(mes)s
+        GROUP BY anio
+        ORDER BY anio
+        """,
+        {"mes": mes},
+    )
+    return [{"anio": a, "total": n} for a, n in filas]
+
+
+def _calendario_datos_supabase(mes: int, desde: date, hasta: date):
+    return _descargas_mes_supabase(desde, hasta), _comparacion_anios_supabase(mes)
+
+
+def _calendario_datos_desde_parquet(mes: int, desde: date, hasta: date):
+    archivo = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
+    cols = ["Fecha", "Hora", "Latitud", "Longitud", "Corriente_kA", "Polaridad_Descargas"]
+    schema = pl.read_parquet_schema(archivo)
+    df = pl.read_parquet(archivo, columns=[c for c in cols if c in schema])
+    df_mes = df.filter((pl.col("Fecha") >= desde) & (pl.col("Fecha") <= hasta))
+
+    comparacion_anios = []
+    if "Fecha" in df.columns and len(df):
+        por_anio = (
+            df.filter(pl.col("Fecha").dt.month() == mes)
+              .with_columns(pl.col("Fecha").dt.year().alias("anio"))
+              .group_by("anio").agg(pl.len().alias("n"))
+              .sort("anio")
+        )
+        comparacion_anios = [{"anio": a, "total": n} for a, n in por_anio.iter_rows()]
+    return df_mes, comparacion_anios
+
+
 @app.post("/api/calendario")
 async def calendario_mensual(
     anio: int = Form(...),
@@ -941,16 +1005,16 @@ async def calendario_mensual(
                                filtro_estructura, filtro_proteccion)
         df_postes = prep["df"]
 
-        archivo = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
-        cols = ["Fecha", "Hora", "Latitud", "Longitud", "Corriente_kA", "Polaridad_Descargas"]
-        schema = pl.read_parquet_schema(archivo)
-        df = pl.read_parquet(archivo, columns=[c for c in cols if c in schema])
-
         # El mes completo, del 1 al ultimo dia
         dias_mes = calendar.monthrange(anio, mes)[1]
         desde = date(anio, mes, 1)
         hasta = date(anio, mes, dias_mes)
-        df_mes = df.filter((pl.col("Fecha") >= desde) & (pl.col("Fecha") <= hasta))
+
+        try:
+            df_mes, comparacion_anios = _calendario_datos_supabase(mes, desde, hasta)
+        except SupabaseNoDisponible as e:
+            print(f"Supabase no disponible en /api/calendario, uso el parquet local: {e}")
+            df_mes, comparacion_anios = _calendario_datos_desde_parquet(mes, desde, hasta)
 
         # Descargas de la region por dia, sin recorte geografico: es el
         # denominador que dice si el dia estuvo tormentoso en general
@@ -958,21 +1022,6 @@ async def calendario_mensual(
         if len(df_mes):
             for f, n in df_mes.group_by("Fecha").agg(pl.len().alias("n")).iter_rows():
                 rango_por_dia[f.isoformat()] = n
-
-        # Mismo mes en todos los anios con datos, para saber si este mes fue
-        # mas o menos tormentoso que lo usual. Sin recorte geografico (igual
-        # que rango_por_dia): es una referencia regional, no de estructuras
-        # puntuales, y sale del parquet que ya esta en memoria, sin leerlo de
-        # nuevo ni repetir el cruce espacial por cada anio
-        comparacion_anios = []
-        if "Fecha" in df.columns and len(df):
-            por_anio = (
-                df.filter(pl.col("Fecha").dt.month() == mes)
-                  .with_columns(pl.col("Fecha").dt.year().alias("anio"))
-                  .group_by("anio").agg(pl.len().alias("n"))
-                  .sort("anio")
-            )
-            comparacion_anios = [{"anio": a, "total": n} for a, n in por_anio.iter_rows()]
 
         # Cruce espacial una sola vez para todo el mes
         EARTH_RADIUS_M = 6371000.0
