@@ -43,7 +43,7 @@ def _obtener_pool():
     return _pool
 
 
-def consultar(sql: str, params: tuple = ()) -> list[tuple]:
+def consultar(sql: str, params: tuple | dict = ()) -> list[tuple]:
     """Ejecuta un SELECT contra Supabase y devuelve las filas como tuplas.
 
     Levanta SupabaseNoDisponible si la variable de entorno no esta configurada,

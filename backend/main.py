@@ -605,6 +605,69 @@ def preparar_postes(filtro_campo="", filtro_locacion="", filtro_portico="",
     }
 
 
+def _descargas_gold_supabase(fecha_inicio: date | None, fecha_fin: date | None) -> pl.DataFrame:
+    """Trae de Supabase solo las columnas y el rango de fechas que /api/procesar
+    necesita. El filtro de fecha va en el WHERE, no despues: es lo que evita
+    bajar el historico completo (~780 mil filas) en cada request."""
+    filas = consultar(
+        """
+        SELECT fecha, latitud::float8, longitud::float8, corriente_ka, polaridad, error_km
+        FROM public.gpk_descargas_atmosfericas_gold
+        WHERE (%(desde)s::date IS NULL OR fecha >= %(desde)s::date)
+          AND (%(hasta)s::date IS NULL OR fecha <= %(hasta)s::date)
+        ORDER BY fecha
+        """,
+        {"desde": fecha_inicio, "hasta": fecha_fin},
+    )
+    return pl.DataFrame(
+        filas,
+        schema={
+            "Fecha": pl.Date,
+            "Latitud": pl.Float64,
+            "Longitud": pl.Float64,
+            "Corriente_kA": pl.Float64,
+            "Polaridad_Descargas": pl.Utf8,
+            "Error_km": pl.Float64,
+        },
+        orient="row",
+    )
+
+
+def _descargas_desde_parquet(fecha_inicio: date | None, fecha_fin: date | None) -> pl.DataFrame:
+    """Mismo resultado que _descargas_gold_supabase, leyendo el parquet local.
+    Es el respaldo si Supabase no esta disponible."""
+    archivo_descargas = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
+    try:
+        # Detectar las columnas disponibles para leer lo minimo necesario
+        schema = pl.read_parquet_schema(archivo_descargas)
+        cols_to_read = []
+        for c in ["Fecha", "Hora", "AÃ±o", "Año", "Mes", "Dia", "Latitud", "Longitud",
+                  "Corriente_kA", "Corriente (kA)", "Polaridad_Descargas", "Error_km"]:
+            if c in schema:
+                cols_to_read.append(c)
+        df_descargas = pl.read_parquet(archivo_descargas, columns=cols_to_read)
+
+        if "Fecha" in df_descargas.columns:
+            es_date = df_descargas.schema["Fecha"] == pl.Date
+            if fecha_inicio:
+                if es_date:
+                    df_descargas = df_descargas.filter(pl.col("Fecha") >= fecha_inicio)
+                else:
+                    df_descargas = df_descargas.filter(
+                        pl.col("Fecha").str.strptime(pl.Date, "%Y-%m-%d", strict=False) >= fecha_inicio
+                    )
+            if fecha_fin:
+                if es_date:
+                    df_descargas = df_descargas.filter(pl.col("Fecha") <= fecha_fin)
+                else:
+                    df_descargas = df_descargas.filter(
+                        pl.col("Fecha").str.strptime(pl.Date, "%Y-%m-%d", strict=False) <= fecha_fin
+                    )
+        return df_descargas
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"No se pudo leer el archivo de descargas local: {str(e)}")
+
+
 @app.post("/api/procesar")
 async def procesar_datos(
     radio_busqueda_metros: float = Form(1000.0),
@@ -619,47 +682,24 @@ async def procesar_datos(
     validar_radio(radio_busqueda_metros)
 
     try:
-        # Archivos locales montados en el contenedor Docker en /app
-        archivo_descargas = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
-        archivo_postes = ARCHIVO_INVENTARIO
+        dt_inicio = None
+        if fecha_inicio:
+            try:
+                dt_inicio = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
+            except ValueError as e:
+                print(f"Error parseando fecha_inicio: {e}")
+        dt_fin = None
+        if fecha_fin:
+            try:
+                dt_fin = datetime.strptime(fecha_fin, "%Y-%m-%d").date()
+            except ValueError as e:
+                print(f"Error parseando fecha_fin: {e}")
 
         try:
-            # Detectar las columnas disponibles para leer lo minimo necesario
-            schema = pl.read_parquet_schema(archivo_descargas)
-            cols_to_read = []
-            for c in ["Fecha", "Hora", "AÃ±o", "Año", "Mes", "Dia", "Latitud", "Longitud",
-                      "Corriente_kA", "Corriente (kA)", "Polaridad_Descargas", "Error_km"]:
-                if c in schema:
-                    cols_to_read.append(c)
-            df_descargas = pl.read_parquet(archivo_descargas, columns=cols_to_read)
-            
-            # Filtro por fechas si el usuario lo envió
-            if "Fecha" in df_descargas.columns:
-                if fecha_inicio:
-                    try:
-                        dt_inicio = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
-                        # Si la columna ya es Date, filtramos directo
-                        if df_descargas.schema["Fecha"] == pl.Date:
-                            df_descargas = df_descargas.filter(pl.col("Fecha") >= dt_inicio)
-                        else:
-                            df_descargas = df_descargas.filter(
-                                pl.col("Fecha").str.strptime(pl.Date, "%Y-%m-%d", strict=False) >= dt_inicio
-                            )
-                    except Exception as e:
-                        print(f"Error parseando fecha_inicio: {e}")
-                if fecha_fin:
-                    try:
-                        dt_fin = datetime.strptime(fecha_fin, "%Y-%m-%d").date()
-                        if df_descargas.schema["Fecha"] == pl.Date:
-                            df_descargas = df_descargas.filter(pl.col("Fecha") <= dt_fin)
-                        else:
-                            df_descargas = df_descargas.filter(
-                                pl.col("Fecha").str.strptime(pl.Date, "%Y-%m-%d", strict=False) <= dt_fin
-                            )
-                    except Exception as e:
-                        print(f"Error parseando fecha_fin: {e}")
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"No se pudo leer el archivo de descargas local: {str(e)}")
+            df_descargas = _descargas_gold_supabase(dt_inicio, dt_fin)
+        except SupabaseNoDisponible as e:
+            print(f"Supabase no disponible en /api/procesar, uso el parquet local: {e}")
+            df_descargas = _descargas_desde_parquet(dt_inicio, dt_fin)
 
         # Todo el recorte de estructuras (ubicacion, estructura puntual y
         # proteccion) vive en preparar_postes, compartido con el calendario
