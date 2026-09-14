@@ -179,6 +179,15 @@ class _CacheRespuestas:
 
 _cache_respuestas = _CacheRespuestas(CACHE_MAX_BYTES)
 
+# Calculos (respuestas que no estan en cache) que pueden correr a la vez. Con
+# la CPU de Render Free (0,1) correr mas en paralelo no termina ninguno antes,
+# porque se reparten la misma CPU, pero si suma la memoria de todos: con 10
+# usuarios calculando a la vez el servidor llego a 460 MB de los 512 MB, y
+# pasarse tumba el servicio para todos. Las respuestas en cache no pasan por
+# aca y salen al instante.
+MAX_CALCULOS_SIMULTANEOS = 3
+_turnos_calculo = threading.BoundedSemaphore(MAX_CALCULOS_SIMULTANEOS)
+
 
 def con_cache(endpoint):
     """Sirve la respuesta guardada si los datos no cambiaron; si no, la calcula
@@ -188,7 +197,8 @@ def con_cache(endpoint):
     def envoltura(**parametros):
         firma = _firma_datos()
         if firma is None:
-            return endpoint(**parametros)
+            with _turnos_calculo:
+                return endpoint(**parametros)
         clave = (endpoint.__name__, tuple(sorted(parametros.items())))
         cuerpo = _cache_respuestas.obtener(firma, clave)
         if cuerpo is None:
@@ -196,7 +206,8 @@ def con_cache(endpoint):
                 cuerpo = _cache_respuestas.obtener(firma, clave)
                 if cuerpo is None:
                     _estado_peticion.uso_respaldo = False
-                    respuesta = endpoint(**parametros)
+                    with _turnos_calculo:
+                        respuesta = endpoint(**parametros)
                     if (isinstance(respuesta, JSONResponse) and respuesta.status_code == 200
                             and not _estado_peticion.uso_respaldo):
                         _cache_respuestas.guardar(firma, clave, respuesta.body)
@@ -578,7 +589,9 @@ def _cruzar_inventario_y_maestro():
         for loc in jerarquia[campo]:
             jerarquia[campo][loc].sort()
 
-    df_inv = pd.read_excel(ARCHIVO_INVENTARIO)
+    # El mismo inventario que ya leyo _inventario_base: releer el Excel costaba
+    # ~0,3 s de CPU en cada arranque en frio (unos 3 s en Render Free)
+    df_inv = _inventario_base()["crudo"]
     col_tag = "Estructura_Tag_Corregido" if "Estructura_Tag_Corregido" in df_inv.columns else "Estructura_Tag"
     col_circuito = "Circuito_Corregido" if "Circuito_Corregido" in df_inv.columns else "Circuito"
 
