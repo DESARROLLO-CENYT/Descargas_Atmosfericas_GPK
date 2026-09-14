@@ -214,8 +214,9 @@ def _segundos_desde_medianoche(hora) -> int | None:
     return None
 
 
-# Arbol espacial de TODAS las descargas del historico, cacheado en memoria. Lo
-# usa el marcado del calendario del sidebar (dias con impacto dentro del radio):
+# Arbol espacial de las descargas de todo el historico que caen cerca de las
+# estructuras, cacheado en memoria. Lo usa el marcado del calendario del
+# sidebar (dias con impacto dentro del radio):
 # construirlo una sola vez hace que un cambio de filtro o de radio solo tenga
 # que re-consultar las estructuras, que es rapido. Se reconstruye si cambia la
 # "firma" del origen de datos: MAX(fecha) en Supabase, o el mtime del parquet
@@ -227,26 +228,29 @@ _arbol_rayos_firma = None
 def _arbol_desde_supabase():
     """(firma, arbol, fechas), o (None, None, None) si la tabla esta vacia.
 
-    La firma es la fecha mas reciente en gold: si no cambio desde la ultima
-    vez, se salta la descarga del historico completo de lat/lon (~780 mil
-    filas) y se reusa el arbol ya construido. Es el riesgo de egress que
-    señala el README (Traspaso dashboard -> Supabase, punto 1) — con esto solo
-    se paga el costo completo una vez por dia (cuando el pipeline suma un dia
-    nuevo) o una vez por cold start de Render, no en cada request.
+    El arbol cubre la zona de TODAS las estructuras mas el radio maximo, no el
+    historico entero: sirve igual para cualquier filtro (siempre es un
+    subconjunto de las estructuras) y cualquier radio valido, y son ~37 mil
+    filas en vez de ~780 mil. Por eso la firma incluye las fechas de
+    modificacion de los Excel ademas de la fecha mas reciente en gold: si el
+    inventario cambia, la zona tambien.
     """
     filas = consultar("SELECT MAX(fecha) FROM public.gpk_descargas_atmosfericas_gold")
-    firma = filas[0][0] if filas and filas[0][0] is not None else None
-    if firma is None:
+    if not filas or filas[0][0] is None:
         return None, None, None
+    firma = (filas[0][0], _firma_archivos())
 
     if _arbol_rayos_cache is not None and firma == _arbol_rayos_firma:
         arbol, fechas = _arbol_rayos_cache
         return firma, arbol, fechas
 
+    caja = _caja_alrededor(preparar_postes()["df"], RADIO_MAXIMO_METROS)
+    if caja is None:
+        return firma, None, None
     filas = consultar(
-        "SELECT fecha, latitud::float8, longitud::float8 "
-        "FROM public.gpk_descargas_atmosfericas_gold "
-        "WHERE latitud IS NOT NULL AND longitud IS NOT NULL"
+        f"SELECT fecha, latitud::float8, longitud::float8 "
+        f"FROM public.gpk_descargas_atmosfericas_gold WHERE {_FILTRO_CAJA}",
+        caja,
     )
     if not filas:
         return firma, None, None
@@ -655,19 +659,67 @@ def preparar_postes(filtro_campo="", filtro_locacion="", filtro_portico="",
     }
 
 
-def _descargas_gold_supabase(fecha_inicio: date | None, fecha_fin: date | None) -> pl.DataFrame:
-    """Trae de Supabase solo las columnas y el rango de fechas que /api/procesar
-    necesita. El filtro de fecha va en el WHERE, no despues: es lo que evita
-    bajar el historico completo (~780 mil filas) en cada request."""
+RADIO_TIERRA_M = 6371000.0
+
+_FILTRO_CAJA = "latitud BETWEEN %(la0)s AND %(la1)s AND longitud BETWEEN %(lo0)s AND %(lo1)s"
+
+
+def _caja_alrededor(df_postes: pl.DataFrame, radio_m: float) -> dict | None:
+    """Rectangulo lat/lon que contiene todo punto a menos de radio_m de alguna
+    estructura, o None si no hay estructuras.
+
+    Permite pedirle a Supabase solo los rayos que pueden caer dentro de algun
+    radio. Las descargas cubren un area ~63 veces mayor que la de las
+    estructuras: medido sobre el historico completo, solo el 4,7 % cae dentro de
+    esta caja con el radio maximo. El resto viajaba por la red (14,6 s para 5
+    años) para que el BallTree lo descartara.
+    """
+    if not len(df_postes):
+        return None
+    metros_por_grado = RADIO_TIERRA_M * math.pi / 180
+    la0, la1 = df_postes["lat_clean"].min(), df_postes["lat_clean"].max()
+    lo0, lo1 = df_postes["lon_clean"].min(), df_postes["lon_clean"].max()
+    # Un grado de latitud mide lo mismo en todas partes; uno de longitud se
+    # achica con cos(latitud), asi que ese margen se calcula con la latitud mas
+    # alejada del ecuador, donde hace falta mas. El 5 % extra cubre la diferencia
+    # entre esta cuenta plana y la distancia haversine del BallTree.
+    margen_lat = radio_m / metros_por_grado * 1.05
+    lat_extrema = max(abs(la0), abs(la1)) + margen_lat
+    margen_lon = radio_m / (metros_por_grado * math.cos(math.radians(lat_extrema))) * 1.05
+    return {"la0": la0 - margen_lat, "la1": la1 + margen_lat,
+            "lo0": lo0 - margen_lon, "lo1": lo1 + margen_lon}
+
+
+def _total_region_supabase(desde: date | None, hasta: date | None,
+                           solo_con_coordenadas: bool) -> int:
+    """Descargas de toda la region en el rango, contadas en Postgres: el
+    denominador de las tarjetas no necesita traer las filas."""
+    coordenadas = " AND latitud IS NOT NULL AND longitud IS NOT NULL" if solo_con_coordenadas else ""
     filas = consultar(
-        """
+        f"""
+        SELECT count(*) FROM public.gpk_descargas_atmosfericas_gold
+        WHERE (%(desde)s::date IS NULL OR fecha >= %(desde)s::date)
+          AND (%(hasta)s::date IS NULL OR fecha <= %(hasta)s::date){coordenadas}
+        """,
+        {"desde": desde, "hasta": hasta},
+    )
+    return filas[0][0]
+
+
+def _descargas_gold_supabase(fecha_inicio: date | None, fecha_fin: date | None,
+                             caja: dict | None) -> pl.DataFrame:
+    """Trae de Supabase solo las columnas, el rango de fechas y la zona que
+    /api/procesar necesita. Los dos filtros van en el WHERE, no despues."""
+    filas = [] if caja is None else consultar(
+        f"""
         SELECT fecha, latitud::float8, longitud::float8, corriente_ka, polaridad, error_km
         FROM public.gpk_descargas_atmosfericas_gold
         WHERE (%(desde)s::date IS NULL OR fecha >= %(desde)s::date)
           AND (%(hasta)s::date IS NULL OR fecha <= %(hasta)s::date)
+          AND {_FILTRO_CAJA}
         ORDER BY fecha
         """,
-        {"desde": fecha_inicio, "hasta": fecha_fin},
+        {"desde": fecha_inicio, "hasta": fecha_fin, **caja},
     )
     return pl.DataFrame(
         filas,
@@ -745,22 +797,30 @@ async def procesar_datos(
             except ValueError as e:
                 print(f"Error parseando fecha_fin: {e}")
 
-        try:
-            df_descargas = _descargas_gold_supabase(dt_inicio, dt_fin)
-        except SupabaseNoDisponible as e:
-            print(f"Supabase no disponible en /api/procesar, uso el parquet local: {e}")
-            df_descargas = _descargas_desde_parquet(dt_inicio, dt_fin)
-
         # Todo el recorte de estructuras (ubicacion, estructura puntual y
-        # proteccion) vive en preparar_postes, compartido con el calendario
+        # proteccion) vive en preparar_postes, compartido con el calendario.
+        # Va antes que las descargas porque su ubicacion define que rayos pedir.
         prep = preparar_postes(filtro_campo, filtro_locacion, filtro_portico,
                                filtro_estructura, filtro_proteccion)
         df_postes = prep["df"]
-        df_inv_crudo = prep["crudo"]
         id_poste_col = prep["col_id"]
         circuito_col = prep["col_circuito"]
         dps_col = prep["col_dps"]
         detalle_estructura = prep["detalle"]
+
+        # Total del rango de fechas, sin recorte geografico ni filtros de
+        # ubicacion: es el denominador contra el que se compara cuantas
+        # descargas llegaron a amenazar una estructura. Con Supabase se cuenta
+        # en Postgres, porque solo se traen las filas cercanas a las estructuras;
+        # con el parquet se cuenta abajo, sobre el rango completo.
+        total_rayos_rango = None
+        try:
+            df_descargas = _descargas_gold_supabase(
+                dt_inicio, dt_fin, _caja_alrededor(df_postes, radio_busqueda_metros))
+            total_rayos_rango = _total_region_supabase(dt_inicio, dt_fin, solo_con_coordenadas=True)
+        except SupabaseNoDisponible as e:
+            print(f"Supabase no disponible en /api/procesar, uso el parquet local: {e}")
+            df_descargas = _descargas_desde_parquet(dt_inicio, dt_fin)
 
         # Para descargas
         lat_desc_col = "Latitud" if "Latitud" in df_descargas.columns else "LATITUDE"
@@ -786,10 +846,8 @@ async def procesar_datos(
         if fecha_col:
             df_descargas = df_descargas.sort(fecha_col)
 
-        # Total del rango de fechas, sin recorte geografico ni filtros de
-        # ubicacion: es el denominador contra el que se compara cuantas
-        # descargas llegaron a amenazar una estructura
-        total_rayos_rango = len(df_descargas)
+        if total_rayos_rango is None:
+            total_rayos_rango = len(df_descargas)
 
         # Convertir a radianes para BallTree (haversine)
         EARTH_RADIUS_M = 6371000.0
@@ -802,7 +860,7 @@ async def procesar_datos(
         # nada que cruzar. BallTree revienta con un array vacio, asi que se salta
         # el cruce y se responde el mapa sin rayos en vez de devolver un error
         aviso = None
-        if len(descargas_coords_rad) == 0:
+        if total_rayos_rango == 0:
             indices = [np.array([], dtype=int)] * len(postes_coords_rad)
             distancias = [np.array([])] * len(postes_coords_rad)
             aviso = "No hay descargas registradas en el rango de fechas seleccionado."
@@ -810,6 +868,10 @@ async def procesar_datos(
             indices = []
             distancias = []
             aviso = "Ninguna estructura coincide con los filtros seleccionados."
+        elif len(descargas_coords_rad) == 0:
+            # Hubo descargas en la region, pero ninguna cerca de las estructuras
+            indices = [np.array([], dtype=int)] * len(postes_coords_rad)
+            distancias = [np.array([])] * len(postes_coords_rad)
         else:
             # Construir BallTree sobre DESCARGAS
             tree = BallTree(descargas_coords_rad, leaf_size=40, metric='haversine')
@@ -964,15 +1026,15 @@ async def procesar_datos(
             content={"message": f"Error procesando datos: {str(e)}"}
         )
 
-def _descargas_rango_supabase(desde: date, hasta: date) -> pl.DataFrame:
-    filas = consultar(
-        """
+def _descargas_rango_supabase(desde: date, hasta: date, caja: dict | None) -> pl.DataFrame:
+    filas = [] if caja is None else consultar(
+        f"""
         SELECT fecha, hora::text, latitud::float8, longitud::float8, corriente_ka, polaridad
         FROM public.gpk_descargas_atmosfericas_gold
-        WHERE fecha >= %(desde)s AND fecha <= %(hasta)s
+        WHERE fecha >= %(desde)s AND fecha <= %(hasta)s AND {_FILTRO_CAJA}
         ORDER BY fecha
         """,
-        {"desde": desde, "hasta": hasta},
+        {"desde": desde, "hasta": hasta, **caja},
     )
     return pl.DataFrame(
         filas,
@@ -1005,8 +1067,16 @@ def _comparacion_anios_supabase(mes: int) -> list[dict]:
     return [{"anio": a, "total": n} for a, n in filas]
 
 
-def _calendario_datos_supabase(mes: int, desde: date, hasta: date):
-    return _descargas_rango_supabase(desde, hasta), _comparacion_anios_supabase(mes)
+def _conteo_por_dia_supabase(desde: date, hasta: date) -> dict:
+    filas = consultar(
+        """
+        SELECT fecha, count(*) FROM public.gpk_descargas_atmosfericas_gold
+        WHERE fecha >= %(desde)s AND fecha <= %(hasta)s
+        GROUP BY fecha
+        """,
+        {"desde": desde, "hasta": hasta},
+    )
+    return {f.isoformat(): n for f, n in filas}
 
 
 def _calendario_datos_desde_parquet(mes: int, desde: date, hasta: date):
@@ -1060,18 +1130,21 @@ async def calendario_mensual(
         desde = date(anio, mes, 1)
         hasta = date(anio, mes, dias_mes)
 
+        # rango_por_dia: descargas de la region por dia, sin recorte geografico.
+        # Es el denominador que dice si el dia estuvo tormentoso en general; con
+        # Supabase se cuenta en Postgres porque df_mes trae solo la zona de las
+        # estructuras.
         try:
-            df_mes, comparacion_anios = _calendario_datos_supabase(mes, desde, hasta)
+            df_mes = _descargas_rango_supabase(desde, hasta, _caja_alrededor(df_postes, radio_busqueda_metros))
+            comparacion_anios = _comparacion_anios_supabase(mes)
+            rango_por_dia = _conteo_por_dia_supabase(desde, hasta)
         except SupabaseNoDisponible as e:
             print(f"Supabase no disponible en /api/calendario, uso el parquet local: {e}")
             df_mes, comparacion_anios = _calendario_datos_desde_parquet(mes, desde, hasta)
-
-        # Descargas de la region por dia, sin recorte geografico: es el
-        # denominador que dice si el dia estuvo tormentoso en general
-        rango_por_dia = {}
-        if len(df_mes):
-            for f, n in df_mes.group_by("Fecha").agg(pl.len().alias("n")).iter_rows():
-                rango_por_dia[f.isoformat()] = n
+            rango_por_dia = {}
+            if len(df_mes):
+                for f, n in df_mes.group_by("Fecha").agg(pl.len().alias("n")).iter_rows():
+                    rango_por_dia[f.isoformat()] = n
 
         # Cruce espacial una sola vez para todo el mes
         EARTH_RADIUS_M = 6371000.0
@@ -1218,12 +1291,16 @@ async def simulador_rango(
                                filtro_estructura, filtro_proteccion)
         df_postes = prep["df"]
 
+        # total_region: toda la region, sin recorte geografico. Decide si el
+        # periodo fue soleado; con Supabase se cuenta en Postgres porque df_rango
+        # trae solo la zona de las estructuras.
         try:
-            df_rango = _descargas_rango_supabase(d0, d1)
+            df_rango = _descargas_rango_supabase(d0, d1, _caja_alrededor(df_postes, radio_busqueda_metros))
+            total_region = _total_region_supabase(d0, d1, solo_con_coordenadas=False)
         except SupabaseNoDisponible as e:
             print(f"Supabase no disponible en /api/simulador, uso el parquet local: {e}")
             df_rango = _descargas_rango_desde_parquet(d0, d1)
-        total_region = len(df_rango)
+            total_region = len(df_rango)
 
         EARTH_RADIUS_M = 6371000.0
         limpio = df_rango.with_columns([
