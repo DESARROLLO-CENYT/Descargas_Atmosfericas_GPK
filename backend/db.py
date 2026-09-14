@@ -8,8 +8,7 @@ configurada, y no se rompe si Supabase esta pausado o el pooler no responde.
 """
 import os
 
-import psycopg2
-from psycopg2 import pool
+from psycopg2.pool import ThreadedConnectionPool
 
 _pool = None
 _pool_intentado = False
@@ -35,8 +34,32 @@ def _obtener_pool():
     try:
         # Pool chico: el Transaction pooler ya multiplexa del lado de Supabase,
         # y el plan Nano solo admite 60 conexiones en total, compartidas con el
-        # pipeline
-        _pool = psycopg2.pool.SimpleConnectionPool(1, 3, dsn, connect_timeout=5)
+        # pipeline. ThreadedConnectionPool (no SimpleConnectionPool) porque es
+        # el que psycopg2 documenta como seguro si algun dia una ruta corre en
+        # un thread aparte (ej. un endpoint sync, que FastAPI despacha a un
+        # threadpool automaticamente).
+        #
+        # sslmode=require: sin esto, psycopg2 usa "prefer" por defecto, que
+        # intenta cifrar pero cae a texto plano en silencio si la negociacion
+        # TLS falla. Verificado contra este mismo pooler: acepta conexiones
+        # sin cifrar si el cliente no exige TLS explicitamente. "require" no
+        # tolera ese downgrade: si el servidor no puede cifrar, la conexion
+        # directamente falla en vez de mandar la contraseña y las queries en
+        # claro.
+        #
+        # No hace falta fijar statement_timeout aca: Supabase ya aplica 2 min
+        # por defecto a nivel de proyecto (verificado con SHOW statement_timeout),
+        # y pasarlo via "options" en el connect no tiene efecto a traves del
+        # Transaction pooler (las conexiones fisicas se comparten entre
+        # clientes, asi que el SET de arranque no persiste). Si se quiere un
+        # tope mas ajustado, va con ALTER ROLE dashboard_readonly SET
+        # statement_timeout = '15s' en el SQL Editor de Supabase — eso si
+        # persiste, porque es config del rol, no de la sesion.
+        _pool = ThreadedConnectionPool(
+            1, 3, dsn,
+            connect_timeout=5,
+            sslmode="require",
+        )
     except Exception as e:
         print(f"No se pudo crear el pool de conexion a Supabase: {e}")
         return None
