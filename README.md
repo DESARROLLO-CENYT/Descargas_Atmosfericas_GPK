@@ -36,9 +36,31 @@ nombres están fijados en `backend/main.py`.
 | `Inventario_Estructuras_y_DPS_Final.xlsx` | Inventario de estructuras: coordenadas, circuito, tipo de apoyo y equipos de protección (DPS, DSD, cable de guarda, puesta a tierra). **759 estructuras.** |
 | `Localizaciones_Final.xlsx` | Maestro de localizaciones. Define la jerarquía de filtros Campo → Locación/Circuito → Pórtico/Tramo. |
 
-**Cómo actualizar los datos:** reemplazar el archivo por la versión nueva
-conservando el mismo nombre y volver a desplegar. El backend detecta el cambio
-por la fecha de modificación e invalida sus cachés solo; no hay que tocar código.
+### Elegir de dónde salen las descargas: parquet o Supabase
+
+La variable `FUENTE_DATOS` (en `.env` para local, en el panel de Render para
+producción) decide la fuente. El tablero muestra una etiqueta con la fuente
+activa y la fecha del dato más reciente.
+
+| `FUENTE_DATOS` | Para qué | Cómo funciona |
+|---|---|---|
+| `parquet` *(por defecto)* | Desarrollo y pruebas | Lee el parquet del repositorio. **Nunca se conecta a Supabase**, aunque la URL esté configurada, así que no gasta egress. |
+| `supabase` | Producción y demos | Arranca con la copia del parquet y le pregunta a Supabase solo qué días cambiaron (huellas por mes y por día); baja únicamente esos. Responde desde memoria y revisa cambios como máximo una vez por minuto mientras alguien usa el tablero. Requiere `SUPABASE_DASHBOARD_DB_URL`. |
+
+Si Supabase no responde, el tablero sigue funcionando con los últimos datos que
+tiene y la etiqueta lo avisa ("Sin conexión con la base · datos hasta …").
+
+**Cómo actualizar el parquet de pruebas** sin gastar egress, copiando el Gold que
+genera el pipeline (definir `RUTA_GOLD_PIPELINE` en `.env`):
+
+```bash
+python scripts/actualizar_parquet.py
+```
+
+El script valida el archivo antes de reemplazarlo. Con `FUENTE_DATOS=parquet` el
+tablero toma la copia nueva solo, sin reiniciar. Para que llegue a Render hay que
+commitearla. Los Excel se actualizan igual que siempre: reemplazar el archivo
+conservando el nombre; el backend detecta el cambio por la fecha de modificación.
 
 > Los pórticos se identifican por el par `circuito␟tag`, no por el tag suelto:
 > el tag `PORT` se repite en varias locaciones y por sí solo no distingue nada.
@@ -70,7 +92,11 @@ El despliegue en Render **no** usa este archivo, sino el `Dockerfile`.
 ```
 ├── backend/
 │   ├── main.py          API FastAPI: cruce espacial, filtros y endpoints
+│   ├── datos.py         Fuente de datos (parquet o Supabase) y sincronización
+│   ├── db.py            Conexión de solo lectura a Supabase
 │   └── informe.py       Generación del informe en Excel
+├── scripts/
+│   └── actualizar_parquet.py  Copia el Gold del pipeline como parquet de pruebas
 ├── static/
 │   ├── index.html       Estructura del tablero (las cuatro vistas)
 │   ├── script.js        Toda la lógica del frontend

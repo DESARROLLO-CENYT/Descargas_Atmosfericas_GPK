@@ -22,6 +22,8 @@ services:
     # el servicio esta vivo; es una lectura de archivo estatico, no toca datos.
     healthCheckPath: /
 
-    # No hay variables de entorno propias: los tres archivos de datos viajan
-    # dentro de la imagen y el puerto lo inyecta Render en $PORT, que el
-    # Dockerfile ya usa en su CMD.
+    # Variables de entorno: se cargan a mano en el panel de Render
+    # (Environment), no aca, porque la URL de Supabase es un secreto.
+    #   FUENTE_DATOS=supabase         sin ella el tablero usa el parquet de la imagen
+    #   SUPABASE_DASHBOARD_DB_URL=... usuario dashboard_readonly, puerto 6543
+    # El puerto lo inyecta Render en $PORT, que el Dockerfile ya usa en su CMD.
