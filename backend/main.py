@@ -6,12 +6,15 @@ import polars as pl
 import numpy as np
 from sklearn.neighbors import BallTree
 import calendar
+import functools
 import io
 import json
 import math
 import os
 import threading
+import time
 import traceback
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from datetime import date, datetime
 import pandas as pd
@@ -78,6 +81,129 @@ def validar_radio(radio_busqueda_metros: float) -> float:
             ).replace(",", "."),
         )
     return radio_busqueda_metros
+
+# ---- Cache de respuestas ----
+#
+# Los datos cambian solo cuando corre el pipeline, una vez al dia. Cada
+# respuesta se guarda por endpoint y combinacion de parametros, y vale mientras
+# no cambie la huella de los datos. Si 10 personas miran el mismo mes, Supabase
+# trabaja una sola vez; si llegan juntas, las demas esperan el resultado de la
+# primera en vez de calcularlo en paralelo.
+#
+# La huella no es solo la fecha mas reciente: publicar_postgres puede borrar y
+# recargar un dia que ya existia (por ejemplo, uno que se bajo incompleto), y
+# eso no cambia MAX(fecha). Se usa la misma huella con la que el pipeline decide
+# que subir: cantidad de filas y suma exacta de la corriente. Cuesta ~0,4 s y se
+# consulta como maximo una vez por minuto, solo cuando hay alguien usando el
+# tablero.
+FIRMA_VIGENCIA_SEGUNDOS = 60
+_FIRMA_SQL = ("SELECT max(fecha), count(*), sum(corriente_ka::numeric) "
+              "FROM public.gpk_descargas_atmosfericas_gold")
+
+# Tope de memoria del cache. Render Free tiene 512 MB; la respuesta mas grande
+# medida (5 años al radio maximo) pesa 2,8 MB y una tipica ~0,25 MB.
+CACHE_MAX_BYTES = 32 * 1024 * 1024
+
+_firma_valor = None
+_firma_hora = float("-inf")
+_candado_firma = threading.Lock()
+
+# Marca por hilo: si la peticion tuvo que usar el parquet, su respuesta no se
+# guarda, para no seguir sirviendo datos desactualizados cuando Supabase vuelva.
+_estado_peticion = threading.local()
+
+
+def _firma_datos():
+    """Huella de los datos (Supabase + fechas de los Excel), o None si Supabase
+    no responde; en ese caso no se usa el cache."""
+    global _firma_valor, _firma_hora
+    if time.monotonic() - _firma_hora > FIRMA_VIGENCIA_SEGUNDOS:
+        with _candado_firma:
+            if time.monotonic() - _firma_hora > FIRMA_VIGENCIA_SEGUNDOS:
+                try:
+                    _firma_valor = tuple(consultar(_FIRMA_SQL)[0])
+                except SupabaseNoDisponible:
+                    _firma_valor = None
+                _firma_hora = time.monotonic()
+    if _firma_valor is None:
+        return None
+    return (_firma_valor, _firma_archivos())
+
+
+def _uso_respaldo(donde: str, error: Exception) -> None:
+    print(f"Supabase no disponible en {donde}, uso el parquet local: {error}")
+    _estado_peticion.uso_respaldo = True
+
+
+class _CacheRespuestas:
+    def __init__(self, max_bytes: int):
+        self._max_bytes = max_bytes
+        self._firma = None
+        self._cuerpos = OrderedDict()
+        self._bytes = 0
+        self._candados_clave = {}
+        self._candado = threading.Lock()
+
+    def candado_de(self, clave) -> threading.Lock:
+        with self._candado:
+            return self._candados_clave.setdefault(clave, threading.Lock())
+
+    def obtener(self, firma, clave) -> bytes | None:
+        with self._candado:
+            if firma != self._firma:
+                return None
+            cuerpo = self._cuerpos.get(clave)
+            if cuerpo is not None:
+                self._cuerpos.move_to_end(clave)
+            return cuerpo
+
+    def guardar(self, firma, clave, cuerpo: bytes) -> None:
+        if len(cuerpo) > self._max_bytes:
+            return
+        with self._candado:
+            if firma != self._firma:
+                self._firma = firma
+                self._cuerpos.clear()
+                self._candados_clave.clear()
+                self._bytes = 0
+            anterior = self._cuerpos.pop(clave, None)
+            if anterior is not None:
+                self._bytes -= len(anterior)
+            self._cuerpos[clave] = cuerpo
+            self._bytes += len(cuerpo)
+            # Se descartan primero las respuestas que hace mas tiempo nadie pide
+            while self._bytes > self._max_bytes:
+                _, viejo = self._cuerpos.popitem(last=False)
+                self._bytes -= len(viejo)
+
+
+_cache_respuestas = _CacheRespuestas(CACHE_MAX_BYTES)
+
+
+def con_cache(endpoint):
+    """Sirve la respuesta guardada si los datos no cambiaron; si no, la calcula
+    una sola vez aunque lleguen varias peticiones iguales a la vez. Solo guarda
+    respuestas 200 calculadas con datos de Supabase."""
+    @functools.wraps(endpoint)
+    def envoltura(**parametros):
+        firma = _firma_datos()
+        if firma is None:
+            return endpoint(**parametros)
+        clave = (endpoint.__name__, tuple(sorted(parametros.items())))
+        cuerpo = _cache_respuestas.obtener(firma, clave)
+        if cuerpo is None:
+            with _cache_respuestas.candado_de(clave):
+                cuerpo = _cache_respuestas.obtener(firma, clave)
+                if cuerpo is None:
+                    _estado_peticion.uso_respaldo = False
+                    respuesta = endpoint(**parametros)
+                    if (isinstance(respuesta, JSONResponse) and respuesta.status_code == 200
+                            and not _estado_peticion.uso_respaldo):
+                        _cache_respuestas.guardar(firma, clave, respuesta.body)
+                    return respuesta
+        return Response(content=cuerpo, media_type="application/json")
+    return envoltura
+
 
 # Montar frontend estático
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -246,14 +372,13 @@ def _arbol_desde_supabase():
     El arbol cubre la zona de TODAS las estructuras mas el radio maximo, no el
     historico entero: sirve igual para cualquier filtro (siempre es un
     subconjunto de las estructuras) y cualquier radio valido, y son ~37 mil
-    filas en vez de ~780 mil. Por eso la firma incluye las fechas de
-    modificacion de los Excel ademas de la fecha mas reciente en gold: si el
-    inventario cambia, la zona tambien.
+    filas en vez de ~780 mil. Usa la misma huella que el cache de respuestas,
+    que incluye las fechas de modificacion de los Excel: si el inventario
+    cambia, la zona tambien.
     """
-    filas = consultar("SELECT MAX(fecha) FROM public.gpk_descargas_atmosfericas_gold")
-    if not filas or filas[0][0] is None:
-        return None, None, None
-    firma = (filas[0][0], _firma_archivos())
+    firma = _firma_datos()
+    if firma is None:
+        raise SupabaseNoDisponible("no se pudo leer la huella de los datos")
 
     if _arbol_rayos_cache is not None and firma == _arbol_rayos_firma:
         arbol, fechas = _arbol_rayos_cache
@@ -311,7 +436,7 @@ def _arbol_todos_los_rayos():
         try:
             firma, arbol, fechas = _arbol_desde_supabase()
         except SupabaseNoDisponible as e:
-            print(f"Supabase no disponible para el arbol de rayos, uso el parquet local: {e}")
+            _uso_respaldo("el arbol de rayos", e)
             firma, arbol, fechas = _arbol_desde_parquet()
 
         if firma is None:
@@ -849,6 +974,7 @@ def _descargas_desde_parquet(fecha_inicio: date | None, fecha_fin: date | None) 
 # usuario acababa de pedir 5 años. Con "def", FastAPI corre cada peticion en su
 # propio hilo y las atiende en paralelo.
 @app.post("/api/procesar")
+@con_cache
 def procesar_datos(
     radio_busqueda_metros: float = Form(1000.0),
     fecha_inicio: str = Form(None),
@@ -897,7 +1023,7 @@ def procesar_datos(
                 dt_inicio, dt_fin, _caja_alrededor(df_postes, radio_busqueda_metros))
             total_rayos_rango = _total_region_supabase(dt_inicio, dt_fin, solo_con_coordenadas=True)
         except SupabaseNoDisponible as e:
-            print(f"Supabase no disponible en /api/procesar, uso el parquet local: {e}")
+            _uso_respaldo("/api/procesar", e)
             df_descargas = _descargas_desde_parquet(dt_inicio, dt_fin)
 
         # Para descargas
@@ -1177,6 +1303,7 @@ def _calendario_datos_desde_parquet(mes: int, desde: date, hasta: date):
 
 
 @app.post("/api/calendario")
+@con_cache
 def calendario_mensual(
     anio: int = Form(...),
     mes: int = Form(...),
@@ -1217,7 +1344,7 @@ def calendario_mensual(
             comparacion_anios = _comparacion_anios_supabase(mes)
             rango_por_dia = _conteo_por_dia_supabase(desde, hasta)
         except SupabaseNoDisponible as e:
-            print(f"Supabase no disponible en /api/calendario, uso el parquet local: {e}")
+            _uso_respaldo("/api/calendario", e)
             df_mes, comparacion_anios = _calendario_datos_desde_parquet(mes, desde, hasta)
             rango_por_dia = {}
             if len(df_mes):
@@ -1334,6 +1461,7 @@ def _descargas_rango_desde_parquet(desde: date, hasta: date) -> pl.DataFrame:
 
 
 @app.post("/api/simulador")
+@con_cache
 def simulador_rango(
     fecha_inicio: str = Form(...),
     fecha_fin: str = Form(...),
@@ -1376,7 +1504,7 @@ def simulador_rango(
             df_rango = _descargas_rango_supabase(d0, d1, _caja_alrededor(df_postes, radio_busqueda_metros))
             total_region = _total_region_supabase(d0, d1, solo_con_coordenadas=False)
         except SupabaseNoDisponible as e:
-            print(f"Supabase no disponible en /api/simulador, uso el parquet local: {e}")
+            _uso_respaldo("/api/simulador", e)
             df_rango = _descargas_rango_desde_parquet(d0, d1)
             total_region = len(df_rango)
 
@@ -1459,6 +1587,7 @@ def simulador_rango(
 
 
 @app.post("/api/dias-radio")
+@con_cache
 def dias_con_impacto_radio(
     radio_busqueda_metros: float = Form(1000.0),
     filtro_campo: str = Form(""),
@@ -1573,7 +1702,6 @@ def obtener_filtros():
         print(f"Error cargando filtros: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
-_cache_rango_fechas = None
 
 def _dias_con_datos_desde_parquet() -> list[str]:
     df = pl.read_parquet(
@@ -1592,29 +1720,26 @@ def _dias_con_datos_desde_supabase() -> list[str]:
 
 
 @app.get("/api/rango-fechas")
+@con_cache
 def obtener_rango_fechas():
-    # Se cachea porque la fuente de datos no cambia entre peticiones y
-    # recorrerla completa en cada carga del calendario es caro
-    global _cache_rango_fechas
-    if _cache_rango_fechas is not None:
-        return JSONResponse(content=_cache_rango_fechas)
-
+    # Va por con_cache y no por un cache propio para siempre: ese se quedaba
+    # con la fecha maxima vieja despues de la carga diaria del pipeline, hasta
+    # que Render reiniciara el servicio
     try:
         try:
             dias = _dias_con_datos_desde_supabase()
         except SupabaseNoDisponible as e:
-            print(f"Supabase no disponible en /api/rango-fechas, uso el parquet local: {e}")
+            _uso_respaldo("/api/rango-fechas", e)
             dias = _dias_con_datos_desde_parquet()
 
         if not dias:
             return JSONResponse(content={"error": "No se encontraron fechas válidas"}, status_code=500)
 
-        _cache_rango_fechas = {
+        return JSONResponse(content={
             "min": dias[0],
             "max": dias[-1],
             "dias_con_datos": dias
-        }
-        return JSONResponse(content=_cache_rango_fechas)
+        })
     except Exception as e:
         print(f"Error cargando rango de fechas: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
