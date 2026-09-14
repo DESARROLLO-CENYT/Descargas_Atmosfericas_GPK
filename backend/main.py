@@ -217,36 +217,86 @@ def _segundos_desde_medianoche(hora) -> int | None:
 # Arbol espacial de TODAS las descargas del historico, cacheado en memoria. Lo
 # usa el marcado del calendario del sidebar (dias con impacto dentro del radio):
 # construirlo una sola vez hace que un cambio de filtro o de radio solo tenga
-# que re-consultar las estructuras, que es rapido. Se reconstruye si el parquet
-# cambia de fecha de modificacion.
+# que re-consultar las estructuras, que es rapido. Se reconstruye si cambia la
+# "firma" del origen de datos: MAX(fecha) en Supabase, o el mtime del parquet
+# en el fallback.
 _arbol_rayos_cache = None
-_arbol_rayos_mtime = None
+_arbol_rayos_firma = None
 
 
-def _arbol_todos_los_rayos():
-    """Devuelve (BallTree, lista_de_fechas) alineados, o (None, None) si vacio."""
-    global _arbol_rayos_cache, _arbol_rayos_mtime
+def _arbol_desde_supabase():
+    """(firma, arbol, fechas), o (None, None, None) si la tabla esta vacia.
+
+    La firma es la fecha mas reciente en gold: si no cambio desde la ultima
+    vez, se salta la descarga del historico completo de lat/lon (~780 mil
+    filas) y se reusa el arbol ya construido. Es el riesgo de egress que
+    señala el README (Traspaso dashboard -> Supabase, punto 1) — con esto solo
+    se paga el costo completo una vez por dia (cuando el pipeline suma un dia
+    nuevo) o una vez por cold start de Render, no en cada request.
+    """
+    filas = consultar("SELECT MAX(fecha) FROM public.gpk_descargas_atmosfericas_gold")
+    firma = filas[0][0] if filas and filas[0][0] is not None else None
+    if firma is None:
+        return None, None, None
+
+    if _arbol_rayos_cache is not None and firma == _arbol_rayos_firma:
+        arbol, fechas = _arbol_rayos_cache
+        return firma, arbol, fechas
+
+    filas = consultar(
+        "SELECT fecha, latitud::float8, longitud::float8 "
+        "FROM public.gpk_descargas_atmosfericas_gold "
+        "WHERE latitud IS NOT NULL AND longitud IS NOT NULL"
+    )
+    if not filas:
+        return firma, None, None
+    fechas = [f for f, _, _ in filas]
+    coords_rad = np.radians(np.array([[la, lo] for _, la, lo in filas]))
+    arbol = BallTree(coords_rad, leaf_size=40, metric="haversine")
+    return firma, arbol, fechas
+
+
+def _arbol_desde_parquet():
+    """Mismo contrato que _arbol_desde_supabase, leyendo el parquet local."""
     archivo = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
     try:
         mtime = os.path.getmtime(archivo)
     except OSError:
+        return None, None, None
+
+    if _arbol_rayos_cache is not None and mtime == _arbol_rayos_firma:
+        arbol, fechas = _arbol_rayos_cache
+        return mtime, arbol, fechas
+
+    schema = pl.read_parquet_schema(archivo)
+    cols = [c for c in ["Fecha", "Latitud", "Longitud"] if c in schema]
+    df = pl.read_parquet(archivo, columns=cols)
+    limpio = df.with_columns([
+        pl.col("Latitud").cast(pl.Float64).alias("la"),
+        pl.col("Longitud").cast(pl.Float64).alias("lo"),
+    ]).drop_nulls(subset=["la", "lo"])
+    if not len(limpio):
+        return mtime, None, None
+    fechas = limpio["Fecha"].to_list()
+    arbol = BallTree(np.radians(limpio.select(["la", "lo"]).to_numpy()),
+                     leaf_size=40, metric="haversine")
+    return mtime, arbol, fechas
+
+
+def _arbol_todos_los_rayos():
+    """Devuelve (BallTree, lista_de_fechas) alineados, o (None, None) si vacio."""
+    global _arbol_rayos_cache, _arbol_rayos_firma
+    try:
+        firma, arbol, fechas = _arbol_desde_supabase()
+    except SupabaseNoDisponible as e:
+        print(f"Supabase no disponible para el arbol de rayos, uso el parquet local: {e}")
+        firma, arbol, fechas = _arbol_desde_parquet()
+
+    if firma is None:
         return None, None
-    if _arbol_rayos_cache is None or mtime != _arbol_rayos_mtime:
-        schema = pl.read_parquet_schema(archivo)
-        cols = [c for c in ["Fecha", "Latitud", "Longitud"] if c in schema]
-        df = pl.read_parquet(archivo, columns=cols)
-        limpio = df.with_columns([
-            pl.col("Latitud").cast(pl.Float64).alias("la"),
-            pl.col("Longitud").cast(pl.Float64).alias("lo"),
-        ]).drop_nulls(subset=["la", "lo"])
-        if not len(limpio):
-            _arbol_rayos_cache = (None, None)
-        else:
-            fechas = limpio["Fecha"].to_list()
-            arbol = BallTree(np.radians(limpio.select(["la", "lo"]).to_numpy()),
-                             leaf_size=40, metric="haversine")
-            _arbol_rayos_cache = (arbol, fechas)
-        _arbol_rayos_mtime = mtime
+
+    _arbol_rayos_cache = (arbol, fechas)
+    _arbol_rayos_firma = firma
     return _arbol_rayos_cache
 
 
