@@ -914,7 +914,7 @@ async def procesar_datos(
             content={"message": f"Error procesando datos: {str(e)}"}
         )
 
-def _descargas_mes_supabase(desde: date, hasta: date) -> pl.DataFrame:
+def _descargas_rango_supabase(desde: date, hasta: date) -> pl.DataFrame:
     filas = consultar(
         """
         SELECT fecha, hora::text, latitud::float8, longitud::float8, corriente_ka, polaridad
@@ -956,7 +956,7 @@ def _comparacion_anios_supabase(mes: int) -> list[dict]:
 
 
 def _calendario_datos_supabase(mes: int, desde: date, hasta: date):
-    return _descargas_mes_supabase(desde, hasta), _comparacion_anios_supabase(mes)
+    return _descargas_rango_supabase(desde, hasta), _comparacion_anios_supabase(mes)
 
 
 def _calendario_datos_desde_parquet(mes: int, desde: date, hasta: date):
@@ -1124,6 +1124,14 @@ async def calendario_mensual(
         return JSONResponse(status_code=400, content={"message": f"Error generando el calendario: {str(e)}"})
 
 
+def _descargas_rango_desde_parquet(desde: date, hasta: date) -> pl.DataFrame:
+    archivo = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
+    cols = ["Fecha", "Hora", "Latitud", "Longitud", "Corriente_kA", "Polaridad_Descargas"]
+    schema = pl.read_parquet_schema(archivo)
+    df = pl.read_parquet(archivo, columns=[c for c in cols if c in schema])
+    return df.filter((pl.col("Fecha") >= desde) & (pl.col("Fecha") <= hasta))
+
+
 @app.post("/api/simulador")
 async def simulador_rango(
     fecha_inicio: str = Form(...),
@@ -1160,11 +1168,11 @@ async def simulador_rango(
                                filtro_estructura, filtro_proteccion)
         df_postes = prep["df"]
 
-        archivo = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
-        cols = ["Fecha", "Hora", "Latitud", "Longitud", "Corriente_kA", "Polaridad_Descargas"]
-        schema = pl.read_parquet_schema(archivo)
-        df = pl.read_parquet(archivo, columns=[c for c in cols if c in schema])
-        df_rango = df.filter((pl.col("Fecha") >= d0) & (pl.col("Fecha") <= d1))
+        try:
+            df_rango = _descargas_rango_supabase(d0, d1)
+        except SupabaseNoDisponible as e:
+            print(f"Supabase no disponible en /api/simulador, uso el parquet local: {e}")
+            df_rango = _descargas_rango_desde_parquet(d0, d1)
         total_region = len(df_rango)
 
         EARTH_RADIUS_M = 6371000.0
