@@ -967,6 +967,37 @@ def _descargas_desde_parquet(fecha_inicio: date | None, fecha_fin: date | None) 
         raise HTTPException(status_code=400, detail=f"No se pudo leer el archivo de descargas local: {str(e)}")
 
 
+def _rayos_para_mapa(df: pl.DataFrame, corriente_col, fecha_col, polaridad_col) -> list[dict]:
+    """Lista de rayos para el mapa, armada por columnas con Polars.
+
+    Equivale a recorrer las filas y armar cada diccionario a mano (asi estaba
+    antes), incluidos los casos borde: corriente ausente -> 0, fecha nula ->
+    "None" como hacia str(None), polaridad nula -> "" como hace _texto.
+    """
+    if fecha_col is None:
+        fecha = pl.lit("")
+    elif df.schema[fecha_col] == pl.Date:
+        fecha = pl.col(fecha_col).cast(pl.Utf8).fill_null("None")
+    else:
+        fecha = pl.col(fecha_col).map_elements(str, return_dtype=pl.Utf8).fill_null("None")
+
+    if polaridad_col is None:
+        polaridad = pl.lit("")
+    elif df.schema[polaridad_col] == pl.Utf8:
+        polaridad = pl.col(polaridad_col).str.strip_chars().fill_null("")
+    else:
+        polaridad = pl.col(polaridad_col).map_elements(_texto, return_dtype=pl.Utf8).fill_null("")
+
+    return df.select(
+        pl.col("lat_desc_clean").alias("lat"),
+        pl.col("lon_desc_clean").alias("lon"),
+        (pl.col(corriente_col) if corriente_col else pl.lit(0)).alias("corriente"),
+        fecha.alias("fecha"),
+        polaridad.alias("polaridad"),
+        pl.int_range(pl.len()).alias("orden"),
+    ).to_dicts()
+
+
 # Los endpoints que consultan datos son "def" y no "async def" a proposito.
 # Adentro todo es bloqueante (psycopg2, Polars, BallTree): dentro de un
 # "async def" eso frena el unico hilo del servidor, y cada usuario esperaba a
@@ -1088,8 +1119,15 @@ def procesar_datos(
                 postes_coords_rad, r=radius_rad, return_distance=True, sort_results=True
             )
 
-        ids_rayos_a_mostrar = set()
+        # Todo lo que sigue recorre las 755 estructuras y, con radios grandes,
+        # decenas de miles de rayos. Se hace con numpy y Polars en vez de fila por
+        # fila en Python: medido con 5 años y radio maximo, el calculo usaba 2,6 s
+        # de CPU, que en Render Free (0,1 de CPU) son casi 30 s por peticion.
+        arreglos_impacto = []
         resumen_impactos = []
+        filas_postes = df_postes.rows(named=True)
+        corrientes_np = (df_descargas[corriente_col].cast(pl.Float64).to_numpy()
+                         if corriente_col else None)
 
         # Impactos de cada poste en el mismo orden que df_postes, para poder
         # ponderar el mapa de calor estructura por estructura
@@ -1111,18 +1149,21 @@ def procesar_datos(
         for i, idx_array in enumerate(indices):
             if len(idx_array) > 0:
                 # Poste i fue impactado por los rayos en idx_array
-                ids_rayos_a_mostrar.update(idx_array)
+                arreglos_impacto.append(idx_array)
 
                 corriente_max = 0
-                if corriente_col:
-                    corrientes = df_descargas[idx_array.tolist()][corriente_col].to_list()
-                    # filtrar None o nulos
-                    corrientes = [c for c in corrientes if c is not None]
+                if corrientes_np is not None:
+                    corrientes = corrientes_np[idx_array]
+                    # filtrar nulos (llegan como NaN)
+                    corrientes = corrientes[~np.isnan(corrientes)]
                     # Las corrientes traen signo y el 62 % de las descargas son
                     # negativas. Con max() a secas, un poste alcanzado por rayos
                     # de -30 kA y -5 kA reportaba -5: el mas debil de los dos.
-                    # Lo que importa es la magnitud, no el signo.
-                    corriente_max = max(corrientes, key=abs) if corrientes else 0
+                    # Lo que importa es la magnitud, no el signo. argmax devuelve
+                    # la primera ocurrencia, igual que max(key=abs): ante un
+                    # empate gana el rayo mas cercano.
+                    if len(corrientes):
+                        corriente_max = float(corrientes[np.argmax(np.abs(corrientes))])
 
                 corriente_max_por_poste[i] = round(corriente_max, 2)
 
@@ -1135,7 +1176,7 @@ def procesar_datos(
                         if err is not None:
                             error_min_por_poste[i] = round(err * 1000, 1)
 
-                row_poste = df_postes.row(i, named=True)
+                row_poste = filas_postes[i]
                 resumen_impactos.append({
                     "TAG": row_poste.get(id_poste_col, f"Poste_{i}"),
                     "Circuito": row_poste.get(circuito_col, "N/A"),
@@ -1145,8 +1186,8 @@ def procesar_datos(
                     "Corriente_Max_kA": round(corriente_max, 2)
                 })
 
-        # Extraer rayos a mostrar
-        idx_list = sorted(list(ids_rayos_a_mostrar))
+        # Extraer rayos a mostrar: un rayo cerca de varias estructuras va una vez
+        idx_list = np.unique(np.concatenate(arreglos_impacto)).tolist() if arreglos_impacto else []
         df_rayos_filtrados = df_descargas[idx_list]
 
         # Preparar data para el Frontend.
@@ -1164,7 +1205,7 @@ def procesar_datos(
             ubicacion_por_id = {}
 
         estructuras_json = []
-        for i, row in enumerate(df_postes.iter_rows(named=True)):
+        for i, row in enumerate(filas_postes):
             tiene_dsd = str(row.get("DSD", "")).strip().upper() in ["SÍ", "SI", "TRUE"]
             tiene_dps = False
             if dps_col:
@@ -1196,16 +1237,7 @@ def procesar_datos(
                 }
             })
 
-        rayos_json = []
-        for i, row in enumerate(df_rayos_filtrados.iter_rows(named=True)):
-            rayos_json.append({
-                "lat": row["lat_desc_clean"],
-                "lon": row["lon_desc_clean"],
-                "corriente": row.get(corriente_col, 0),
-                "fecha": str(row.get(fecha_col, "")),
-                "polaridad": _texto(row.get(polaridad_col)) if polaridad_col else "",
-                "orden": i
-            })
+        rayos_json = _rayos_para_mapa(df_rayos_filtrados, corriente_col, fecha_col, polaridad_col)
 
         return JSONResponse(content={
             "kpis": {
@@ -1518,16 +1550,17 @@ def simulador_rango(
         # filtrada. Un mismo rayo cerca de dos postes se cuenta una sola vez.
         rayos = []
         if len(limpio) and len(df_postes):
-            arbol = BallTree(np.radians(limpio.select(["la", "lo"]).to_numpy()),
-                             leaf_size=40, metric="haversine")
+            coords_limpio = np.radians(limpio.select(["la", "lo"]).to_numpy())
+            arbol = BallTree(coords_limpio, leaf_size=40, metric="haversine")
             idx_por_poste = arbol.query_radius(
                 np.radians(df_postes.select(["lat_clean", "lon_clean"]).to_numpy()),
                 r=radio_busqueda_metros / EARTH_RADIUS_M)
-            dentro = set()
-            for idx in idx_por_poste:
-                dentro.update(int(j) for j in idx)
+            # Con numpy y no con un set de Python: con 5 años y radio maximo son
+            # 3,6 millones de indices, y recorrerlos uno a uno usaba 1,3 s de CPU
+            arreglos = [a for a in idx_por_poste if len(a)]
+            dentro_list = np.unique(np.concatenate(arreglos)).tolist() if arreglos else []
 
-            if dentro:
+            if dentro_list:
                 la = limpio["la"].to_list()
                 lo = limpio["lo"].to_list()
                 fechas = limpio["Fecha"].to_list()
@@ -1537,12 +1570,11 @@ def simulador_rango(
 
                 # Estructura mas cercana a cada rayo (una consulta batch sobre un
                 # arbol de las estructuras filtradas) para la tabla cronologica
-                dentro_list = sorted(dentro)
                 arbol_postes = BallTree(
                     np.radians(df_postes.select(["lat_clean", "lon_clean"]).to_numpy()),
                     leaf_size=40, metric="haversine")
                 tags_postes = df_postes["id_estructura"].to_list()
-                coords_rayos = np.radians(np.array([[la[j], lo[j]] for j in dentro_list]))
+                coords_rayos = coords_limpio[dentro_list]
                 dist_rad, idx_est = arbol_postes.query(coords_rayos, k=1)
 
                 for k_i, j in enumerate(dentro_list):
