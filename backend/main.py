@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
 import polars as pl
 import numpy as np
 from sklearn.neighbors import BallTree
@@ -14,7 +15,10 @@ from datetime import date, datetime
 import pandas as pd
 import uvicorn
 
+from backend.db import consultar, SupabaseNoDisponible
 from backend.informe import construir_informe
+
+load_dotenv()  # en Render las variables ya vienen del entorno; esto solo pega en local
 
 app = FastAPI(title="App Descargas Atmosféricas 2026")
 
@@ -1269,24 +1273,39 @@ async def obtener_filtros():
 
 _cache_rango_fechas = None
 
+def _dias_con_datos_desde_parquet() -> list[str]:
+    df = pl.read_parquet(
+        "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet",
+        columns=["Fecha"]
+    )
+    fechas = df["Fecha"].drop_nulls().unique().sort()
+    return [d.isoformat() for d in fechas.to_list()]
+
+
+def _dias_con_datos_desde_supabase() -> list[str]:
+    filas = consultar(
+        "SELECT DISTINCT fecha FROM public.gpk_descargas_atmosfericas_gold ORDER BY fecha"
+    )
+    return [fecha.isoformat() for (fecha,) in filas]
+
+
 @app.get("/api/rango-fechas")
 async def obtener_rango_fechas():
-    # Se cachea porque el parquet no cambia entre peticiones y recorrerlo
-    # completo en cada carga del calendario es caro
+    # Se cachea porque la fuente de datos no cambia entre peticiones y
+    # recorrerla completa en cada carga del calendario es caro
     global _cache_rango_fechas
     if _cache_rango_fechas is not None:
         return JSONResponse(content=_cache_rango_fechas)
 
     try:
-        df = pl.read_parquet(
-            "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet",
-            columns=["Fecha"]
-        )
-        fechas = df["Fecha"].drop_nulls().unique().sort()
-        dias = [d.isoformat() for d in fechas.to_list()]
+        try:
+            dias = _dias_con_datos_desde_supabase()
+        except SupabaseNoDisponible as e:
+            print(f"Supabase no disponible en /api/rango-fechas, uso el parquet local: {e}")
+            dias = _dias_con_datos_desde_parquet()
 
         if not dias:
-            return JSONResponse(content={"error": "El parquet no tiene fechas válidas"}, status_code=500)
+            return JSONResponse(content={"error": "No se encontraron fechas válidas"}, status_code=500)
 
         _cache_rango_fechas = {
             "min": dias[0],

@@ -3,6 +3,10 @@ fastapi==0.141.1
 uvicorn==0.52.4
 python-multipart==0.0.32       # lectura de los formularios que envia el frontend
 
+# --- Base de datos ---
+psycopg2-binary==2.9.10        # conexion a Supabase (Postgres) por el Transaction pooler
+python-dotenv==1.1.0           # carga SUPABASE_DASHBOARD_DB_URL desde .env en local
+
 # --- Datos y calculo espacial ---
 polars==1.44.1                 # lectura del parquet historico de descargas
 pyarrow==25.0.1                # backend de parquet que usa polars
