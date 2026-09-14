@@ -12,7 +12,6 @@ import json
 import math
 import os
 import threading
-import time
 import traceback
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -20,7 +19,7 @@ from datetime import date, datetime
 import pandas as pd
 import uvicorn
 
-from backend.db import consultar, precalentar, SupabaseNoDisponible
+from backend import datos
 from backend.informe import construir_informe
 
 load_dotenv()  # en Render las variables ya vienen del entorno; esto solo pega en local
@@ -29,7 +28,7 @@ load_dotenv()  # en Render las variables ya vienen del entorno; esto solo pega e
 @asynccontextmanager
 async def ciclo_de_vida(app):
     # Render duerme el servicio tras 15 min sin trafico. Al despertar, el primer
-    # usuario pagaba abrir conexiones, leer los Excel y armar el arbol de rayos.
+    # usuario pagaba cargar los datos, leer los Excel y armar el arbol de rayos.
     # Se adelanta en segundo plano: el servidor atiende de inmediato, y quien
     # llegue mientras tanto espera esa misma preparacion en vez de repetirla
     # (los caches tienen candado).
@@ -84,55 +83,24 @@ def validar_radio(radio_busqueda_metros: float) -> float:
 
 # ---- Cache de respuestas ----
 #
-# Los datos cambian solo cuando corre el pipeline, una vez al dia. Cada
-# respuesta se guarda por endpoint y combinacion de parametros, y vale mientras
-# no cambie la huella de los datos. Si 10 personas miran el mismo mes, Supabase
-# trabaja una sola vez; si llegan juntas, las demas esperan el resultado de la
-# primera en vez de calcularlo en paralelo.
-#
-# La huella no es solo la fecha mas reciente: publicar_postgres puede borrar y
-# recargar un dia que ya existia (por ejemplo, uno que se bajo incompleto), y
-# eso no cambia MAX(fecha). Se usa la misma huella con la que el pipeline decide
-# que subir: cantidad de filas y suma exacta de la corriente. Cuesta ~0,4 s y se
-# consulta como maximo una vez por minuto, solo cuando hay alguien usando el
-# tablero.
-FIRMA_VIGENCIA_SEGUNDOS = 60
-_FIRMA_SQL = ("SELECT max(fecha), count(*), sum(corriente_ka::numeric) "
-              "FROM public.gpk_descargas_atmosfericas_gold")
+# Los datos cambian solo cuando cambia su fuente: el pipeline sube un dia a
+# Supabase o se reemplaza el parquet. Cada respuesta se guarda por endpoint y
+# combinacion de parametros, y vale mientras no cambie la version de los datos
+# (ver backend/datos.py) ni los Excel. Si 10 personas miran el mismo mes se
+# calcula una sola vez; si llegan juntas, las demas esperan ese resultado en vez
+# de calcularlo en paralelo.
 
 # Tope de memoria del cache. Render Free tiene 512 MB; la respuesta mas grande
 # medida (5 años al radio maximo) pesa 2,8 MB y una tipica ~0,25 MB.
 CACHE_MAX_BYTES = 32 * 1024 * 1024
 
-_firma_valor = None
-_firma_hora = float("-inf")
-_candado_firma = threading.Lock()
-
-# Marca por hilo: si la peticion tuvo que usar el parquet, su respuesta no se
-# guarda, para no seguir sirviendo datos desactualizados cuando Supabase vuelva.
-_estado_peticion = threading.local()
+# Datos de la peticion en curso: la misma instantanea que dio la clave del
+# cache, aunque mientras se calcula llegue una version nueva de los datos
+_peticion = threading.local()
 
 
-def _firma_datos():
-    """Huella de los datos (Supabase + fechas de los Excel), o None si Supabase
-    no responde; en ese caso no se usa el cache."""
-    global _firma_valor, _firma_hora
-    if time.monotonic() - _firma_hora > FIRMA_VIGENCIA_SEGUNDOS:
-        with _candado_firma:
-            if time.monotonic() - _firma_hora > FIRMA_VIGENCIA_SEGUNDOS:
-                try:
-                    _firma_valor = tuple(consultar(_FIRMA_SQL)[0])
-                except SupabaseNoDisponible:
-                    _firma_valor = None
-                _firma_hora = time.monotonic()
-    if _firma_valor is None:
-        return None
-    return (_firma_valor, _firma_archivos())
-
-
-def _uso_respaldo(donde: str, error: Exception) -> None:
-    print(f"Supabase no disponible en {donde}, uso el parquet local: {error}")
-    _estado_peticion.uso_respaldo = True
+def _datos() -> "datos.Instantanea":
+    return getattr(_peticion, "instantanea", None) or datos.gestor().instantanea()
 
 
 class _CacheRespuestas:
@@ -181,35 +149,36 @@ _cache_respuestas = _CacheRespuestas(CACHE_MAX_BYTES)
 
 # Calculos (respuestas que no estan en cache) que pueden correr a la vez. Con
 # la CPU de Render Free (0,1) correr mas en paralelo no termina ninguno antes,
-# porque se reparten la misma CPU, pero si suma la memoria de todos: con 10
-# usuarios calculando a la vez el servidor llego a 460 MB de los 512 MB, y
-# pasarse tumba el servicio para todos. Las respuestas en cache no pasan por
-# aca y salen al instante.
-MAX_CALCULOS_SIMULTANEOS = 3
+# porque se reparten la misma CPU, pero si suma la memoria de todos, y pasarse
+# de 512 MB tumba el servicio para todos. Medido con 10 usuarios y 0,1 de CPU:
+# con 3 a la vez, 440 MB y la peor peticion en 44 s; con 2, 424 MB y 24 s. Las
+# respuestas en cache no pasan por aca y salen al instante.
+MAX_CALCULOS_SIMULTANEOS = 2
 _turnos_calculo = threading.BoundedSemaphore(MAX_CALCULOS_SIMULTANEOS)
 
 
 def con_cache(endpoint):
     """Sirve la respuesta guardada si los datos no cambiaron; si no, la calcula
     una sola vez aunque lleguen varias peticiones iguales a la vez. Solo guarda
-    respuestas 200 calculadas con datos de Supabase."""
+    respuestas 200."""
     @functools.wraps(endpoint)
     def envoltura(**parametros):
-        firma = _firma_datos()
-        if firma is None:
-            with _turnos_calculo:
-                return endpoint(**parametros)
+        instantanea = datos.gestor().instantanea()
+        firma = (instantanea.version, _firma_archivos())
         clave = (endpoint.__name__, tuple(sorted(parametros.items())))
         cuerpo = _cache_respuestas.obtener(firma, clave)
         if cuerpo is None:
             with _cache_respuestas.candado_de(clave):
                 cuerpo = _cache_respuestas.obtener(firma, clave)
                 if cuerpo is None:
-                    _estado_peticion.uso_respaldo = False
-                    with _turnos_calculo:
-                        respuesta = endpoint(**parametros)
-                    if (isinstance(respuesta, JSONResponse) and respuesta.status_code == 200
-                            and not _estado_peticion.uso_respaldo):
+                    anterior = getattr(_peticion, "instantanea", None)
+                    _peticion.instantanea = instantanea
+                    try:
+                        with _turnos_calculo:
+                            respuesta = endpoint(**parametros)
+                    finally:
+                        _peticion.instantanea = anterior
+                    if isinstance(respuesta, JSONResponse) and respuesta.status_code == 200:
                         _cache_respuestas.guardar(firma, clave, respuesta.body)
                     return respuesta
         return Response(content=cuerpo, media_type="application/json")
@@ -365,104 +334,10 @@ def _segundos_desde_medianoche(hora) -> int | None:
     return None
 
 
-# Arbol espacial de las descargas de todo el historico que caen cerca de las
-# estructuras, cacheado en memoria. Lo usa el marcado del calendario del
-# sidebar (dias con impacto dentro del radio):
-# construirlo una sola vez hace que un cambio de filtro o de radio solo tenga
-# que re-consultar las estructuras, que es rapido. Se reconstruye si cambia la
-# "firma" del origen de datos: MAX(fecha) en Supabase, o el mtime del parquet
-# en el fallback.
-_arbol_rayos_cache = None
-_arbol_rayos_firma = None
-_candado_arbol = threading.Lock()
-
-
-def _arbol_desde_supabase():
-    """(firma, arbol, fechas), o (None, None, None) si la tabla esta vacia.
-
-    El arbol cubre la zona de TODAS las estructuras mas el radio maximo, no el
-    historico entero: sirve igual para cualquier filtro (siempre es un
-    subconjunto de las estructuras) y cualquier radio valido, y son ~37 mil
-    filas en vez de ~780 mil. Usa la misma huella que el cache de respuestas,
-    que incluye las fechas de modificacion de los Excel: si el inventario
-    cambia, la zona tambien.
-    """
-    firma = _firma_datos()
-    if firma is None:
-        raise SupabaseNoDisponible("no se pudo leer la huella de los datos")
-
-    if _arbol_rayos_cache is not None and firma == _arbol_rayos_firma:
-        arbol, fechas = _arbol_rayos_cache
-        return firma, arbol, fechas
-
-    caja = _caja_alrededor(preparar_postes()["df"], RADIO_MAXIMO_METROS)
-    if caja is None:
-        return firma, None, None
-    filas = consultar(
-        f"SELECT fecha, latitud::float8, longitud::float8 "
-        f"FROM public.gpk_descargas_atmosfericas_gold WHERE {_FILTRO_CAJA}",
-        caja,
-    )
-    if not filas:
-        return firma, None, None
-    fechas = [f for f, _, _ in filas]
-    coords_rad = np.radians(np.array([[la, lo] for _, la, lo in filas]))
-    arbol = BallTree(coords_rad, leaf_size=40, metric="haversine")
-    return firma, arbol, fechas
-
-
-def _arbol_desde_parquet():
-    """Mismo contrato que _arbol_desde_supabase, leyendo el parquet local."""
-    archivo = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
-    try:
-        mtime = os.path.getmtime(archivo)
-    except OSError:
-        return None, None, None
-
-    if _arbol_rayos_cache is not None and mtime == _arbol_rayos_firma:
-        arbol, fechas = _arbol_rayos_cache
-        return mtime, arbol, fechas
-
-    schema = pl.read_parquet_schema(archivo)
-    cols = [c for c in ["Fecha", "Latitud", "Longitud"] if c in schema]
-    df = pl.read_parquet(archivo, columns=cols)
-    limpio = df.with_columns([
-        pl.col("Latitud").cast(pl.Float64).alias("la"),
-        pl.col("Longitud").cast(pl.Float64).alias("lo"),
-    ]).drop_nulls(subset=["la", "lo"])
-    if not len(limpio):
-        return mtime, None, None
-    fechas = limpio["Fecha"].to_list()
-    arbol = BallTree(np.radians(limpio.select(["la", "lo"]).to_numpy()),
-                     leaf_size=40, metric="haversine")
-    return mtime, arbol, fechas
-
-
-def _arbol_todos_los_rayos():
-    """Devuelve (BallTree, lista_de_fechas) alineados, o (None, None) si vacio."""
-    global _arbol_rayos_cache, _arbol_rayos_firma
-    # Con candado: si dos usuarios llegan juntos con el cache vacio, el segundo
-    # espera y reusa el arbol del primero en vez de bajar los rayos dos veces
-    with _candado_arbol:
-        try:
-            firma, arbol, fechas = _arbol_desde_supabase()
-        except SupabaseNoDisponible as e:
-            _uso_respaldo("el arbol de rayos", e)
-            firma, arbol, fechas = _arbol_desde_parquet()
-
-        if firma is None:
-            return None, None
-
-        _arbol_rayos_cache = (arbol, fechas)
-        _arbol_rayos_firma = firma
-        return _arbol_rayos_cache
-
-
 def _preparar_en_segundo_plano():
     try:
-        precalentar(4)
         construir_catalogo()
-        _arbol_todos_los_rayos()
+        datos.gestor().instantanea().arbol()
     except Exception as e:
         print(f"La preparacion en segundo plano no se completo: {e}")
 
@@ -871,18 +746,16 @@ def preparar_postes(filtro_campo="", filtro_locacion="", filtro_portico="",
 
 RADIO_TIERRA_M = 6371000.0
 
-_FILTRO_CAJA = "latitud BETWEEN %(la0)s AND %(la1)s AND longitud BETWEEN %(lo0)s AND %(lo1)s"
-
 
 def _caja_alrededor(df_postes: pl.DataFrame, radio_m: float) -> dict | None:
     """Rectangulo lat/lon que contiene todo punto a menos de radio_m de alguna
     estructura, o None si no hay estructuras.
 
-    Permite pedirle a Supabase solo los rayos que pueden caer dentro de algun
-    radio. Las descargas cubren un area ~63 veces mayor que la de las
-    estructuras: medido sobre el historico completo, solo el 4,7 % cae dentro de
-    esta caja con el radio maximo. El resto viajaba por la red (14,6 s para 5
-    años) para que el BallTree lo descartara.
+    Deja solo los rayos que pueden caer dentro de algun radio. Las descargas
+    cubren un area ~63 veces mayor que la de las estructuras: medido sobre el
+    historico completo, solo el 4,7 % cae dentro de esta caja con el radio
+    maximo. Con el radio maximo y todas las estructuras define la zona que se
+    guarda en memoria (backend/datos.py).
     """
     if not len(df_postes):
         return None
@@ -900,84 +773,10 @@ def _caja_alrededor(df_postes: pl.DataFrame, radio_m: float) -> dict | None:
             "lo0": lo0 - margen_lon, "lo1": lo1 + margen_lon}
 
 
-def _total_region_supabase(desde: date | None, hasta: date | None,
-                           solo_con_coordenadas: bool) -> int:
-    """Descargas de toda la region en el rango, contadas en Postgres: el
-    denominador de las tarjetas no necesita traer las filas."""
-    coordenadas = " AND latitud IS NOT NULL AND longitud IS NOT NULL" if solo_con_coordenadas else ""
-    filas = consultar(
-        f"""
-        SELECT count(*) FROM public.gpk_descargas_atmosfericas_gold
-        WHERE (%(desde)s::date IS NULL OR fecha >= %(desde)s::date)
-          AND (%(hasta)s::date IS NULL OR fecha <= %(hasta)s::date){coordenadas}
-        """,
-        {"desde": desde, "hasta": hasta},
-    )
-    return filas[0][0]
-
-
-def _descargas_gold_supabase(fecha_inicio: date | None, fecha_fin: date | None,
-                             caja: dict | None) -> pl.DataFrame:
-    """Trae de Supabase solo las columnas, el rango de fechas y la zona que
-    /api/procesar necesita. Los dos filtros van en el WHERE, no despues."""
-    filas = [] if caja is None else consultar(
-        f"""
-        SELECT fecha, latitud::float8, longitud::float8, corriente_ka, polaridad, error_km
-        FROM public.gpk_descargas_atmosfericas_gold
-        WHERE (%(desde)s::date IS NULL OR fecha >= %(desde)s::date)
-          AND (%(hasta)s::date IS NULL OR fecha <= %(hasta)s::date)
-          AND {_FILTRO_CAJA}
-        ORDER BY fecha
-        """,
-        {"desde": fecha_inicio, "hasta": fecha_fin, **caja},
-    )
-    return pl.DataFrame(
-        filas,
-        schema={
-            "Fecha": pl.Date,
-            "Latitud": pl.Float64,
-            "Longitud": pl.Float64,
-            "Corriente_kA": pl.Float64,
-            "Polaridad_Descargas": pl.Utf8,
-            "Error_km": pl.Float64,
-        },
-        orient="row",
-    )
-
-
-def _descargas_desde_parquet(fecha_inicio: date | None, fecha_fin: date | None) -> pl.DataFrame:
-    """Mismo resultado que _descargas_gold_supabase, leyendo el parquet local.
-    Es el respaldo si Supabase no esta disponible."""
-    archivo_descargas = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
-    try:
-        # Detectar las columnas disponibles para leer lo minimo necesario
-        schema = pl.read_parquet_schema(archivo_descargas)
-        cols_to_read = []
-        for c in ["Fecha", "Hora", "AÃ±o", "Año", "Mes", "Dia", "Latitud", "Longitud",
-                  "Corriente_kA", "Corriente (kA)", "Polaridad_Descargas", "Error_km"]:
-            if c in schema:
-                cols_to_read.append(c)
-        df_descargas = pl.read_parquet(archivo_descargas, columns=cols_to_read)
-
-        if "Fecha" in df_descargas.columns:
-            es_date = df_descargas.schema["Fecha"] == pl.Date
-            if fecha_inicio:
-                if es_date:
-                    df_descargas = df_descargas.filter(pl.col("Fecha") >= fecha_inicio)
-                else:
-                    df_descargas = df_descargas.filter(
-                        pl.col("Fecha").str.strptime(pl.Date, "%Y-%m-%d", strict=False) >= fecha_inicio
-                    )
-            if fecha_fin:
-                if es_date:
-                    df_descargas = df_descargas.filter(pl.col("Fecha") <= fecha_fin)
-                else:
-                    df_descargas = df_descargas.filter(
-                        pl.col("Fecha").str.strptime(pl.Date, "%Y-%m-%d", strict=False) <= fecha_fin
-                    )
-        return df_descargas
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"No se pudo leer el archivo de descargas local: {str(e)}")
+datos.configurar(
+    caja_zona=lambda: _caja_alrededor(preparar_postes()["df"], RADIO_MAXIMO_METROS),
+    firma_zona=_firma_archivos,
+)
 
 
 def _rayos_para_mapa(df: pl.DataFrame, corriente_col, fecha_col, polaridad_col) -> list[dict]:
@@ -1056,19 +855,14 @@ def procesar_datos(
         dps_col = prep["col_dps"]
         detalle_estructura = prep["detalle"]
 
-        # Total del rango de fechas, sin recorte geografico ni filtros de
-        # ubicacion: es el denominador contra el que se compara cuantas
-        # descargas llegaron a amenazar una estructura. Con Supabase se cuenta
-        # en Postgres, porque solo se traen las filas cercanas a las estructuras;
-        # con el parquet se cuenta abajo, sobre el rango completo.
-        total_rayos_rango = None
-        try:
-            df_descargas = _descargas_gold_supabase(
-                dt_inicio, dt_fin, _caja_alrededor(df_postes, radio_busqueda_metros))
-            total_rayos_rango = _total_region_supabase(dt_inicio, dt_fin, solo_con_coordenadas=True)
-        except SupabaseNoDisponible as e:
-            _uso_respaldo("/api/procesar", e)
-            df_descargas = _descargas_desde_parquet(dt_inicio, dt_fin)
+        instantanea = _datos()
+        df_descargas = instantanea.descargas(
+            dt_inicio, dt_fin, _caja_alrededor(df_postes, radio_busqueda_metros)
+        ).select(["Fecha", "Latitud", "Longitud", "Corriente_kA", "Polaridad_Descargas", "Error_km"])
+        # Total del rango de fechas en toda la region, sin recorte geografico ni
+        # filtros de ubicacion: es el denominador contra el que se compara
+        # cuantas descargas llegaron a amenazar una estructura
+        total_rayos_rango = instantanea.total(dt_inicio, dt_fin, con_coordenadas=True)
 
         # Para descargas
         lat_desc_col = "Latitud" if "Latitud" in df_descargas.columns else "LATITUDE"
@@ -1092,10 +886,8 @@ def procesar_datos(
         
         # Opcional: ordenar descargas por fecha si existe para la gradiente temporal
         if fecha_col:
-            df_descargas = df_descargas.sort(fecha_col)
+            df_descargas = df_descargas.sort(fecha_col, maintain_order=True)
 
-        if total_rayos_rango is None:
-            total_rayos_rango = len(df_descargas)
 
         # Convertir a radianes para BallTree (haversine)
         EARTH_RADIUS_M = 6371000.0
@@ -1275,78 +1067,6 @@ def procesar_datos(
             content={"message": f"Error procesando datos: {str(e)}"}
         )
 
-def _descargas_rango_supabase(desde: date, hasta: date, caja: dict | None) -> pl.DataFrame:
-    filas = [] if caja is None else consultar(
-        f"""
-        SELECT fecha, hora::text, latitud::float8, longitud::float8, corriente_ka, polaridad
-        FROM public.gpk_descargas_atmosfericas_gold
-        WHERE fecha >= %(desde)s AND fecha <= %(hasta)s AND {_FILTRO_CAJA}
-        ORDER BY fecha
-        """,
-        {"desde": desde, "hasta": hasta, **caja},
-    )
-    return pl.DataFrame(
-        filas,
-        schema={
-            "Fecha": pl.Date,
-            "Hora": pl.Utf8,
-            "Latitud": pl.Float64,
-            "Longitud": pl.Float64,
-            "Corriente_kA": pl.Float64,
-            "Polaridad_Descargas": pl.Utf8,
-        },
-        orient="row",
-    )
-
-
-def _comparacion_anios_supabase(mes: int) -> list[dict]:
-    """Total de descargas de ese mes en cada anio con datos, sin recorte
-    geografico. Se calcula en Postgres con GROUP BY: evita traer el historico
-    completo solo para contar filas por anio."""
-    filas = consultar(
-        """
-        SELECT anio, COUNT(*) AS n
-        FROM public.gpk_descargas_atmosfericas_gold
-        WHERE mes = %(mes)s
-        GROUP BY anio
-        ORDER BY anio
-        """,
-        {"mes": mes},
-    )
-    return [{"anio": a, "total": n} for a, n in filas]
-
-
-def _conteo_por_dia_supabase(desde: date, hasta: date) -> dict:
-    filas = consultar(
-        """
-        SELECT fecha, count(*) FROM public.gpk_descargas_atmosfericas_gold
-        WHERE fecha >= %(desde)s AND fecha <= %(hasta)s
-        GROUP BY fecha
-        """,
-        {"desde": desde, "hasta": hasta},
-    )
-    return {f.isoformat(): n for f, n in filas}
-
-
-def _calendario_datos_desde_parquet(mes: int, desde: date, hasta: date):
-    archivo = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
-    cols = ["Fecha", "Hora", "Latitud", "Longitud", "Corriente_kA", "Polaridad_Descargas"]
-    schema = pl.read_parquet_schema(archivo)
-    df = pl.read_parquet(archivo, columns=[c for c in cols if c in schema])
-    df_mes = df.filter((pl.col("Fecha") >= desde) & (pl.col("Fecha") <= hasta))
-
-    comparacion_anios = []
-    if "Fecha" in df.columns and len(df):
-        por_anio = (
-            df.filter(pl.col("Fecha").dt.month() == mes)
-              .with_columns(pl.col("Fecha").dt.year().alias("anio"))
-              .group_by("anio").agg(pl.len().alias("n"))
-              .sort("anio")
-        )
-        comparacion_anios = [{"anio": a, "total": n} for a, n in por_anio.iter_rows()]
-    return df_mes, comparacion_anios
-
-
 @app.post("/api/calendario")
 @con_cache
 def calendario_mensual(
@@ -1380,21 +1100,14 @@ def calendario_mensual(
         desde = date(anio, mes, 1)
         hasta = date(anio, mes, dias_mes)
 
-        # rango_por_dia: descargas de la region por dia, sin recorte geografico.
-        # Es el denominador que dice si el dia estuvo tormentoso en general; con
-        # Supabase se cuenta en Postgres porque df_mes trae solo la zona de las
-        # estructuras.
-        try:
-            df_mes = _descargas_rango_supabase(desde, hasta, _caja_alrededor(df_postes, radio_busqueda_metros))
-            comparacion_anios = _comparacion_anios_supabase(mes)
-            rango_por_dia = _conteo_por_dia_supabase(desde, hasta)
-        except SupabaseNoDisponible as e:
-            _uso_respaldo("/api/calendario", e)
-            df_mes, comparacion_anios = _calendario_datos_desde_parquet(mes, desde, hasta)
-            rango_por_dia = {}
-            if len(df_mes):
-                for f, n in df_mes.group_by("Fecha").agg(pl.len().alias("n")).iter_rows():
-                    rango_por_dia[f.isoformat()] = n
+        instantanea = _datos()
+        df_mes = instantanea.descargas(desde, hasta, _caja_alrededor(df_postes, radio_busqueda_metros))
+        # Descargas de la region por dia, sin recorte geografico: es el
+        # denominador que dice si el dia estuvo tormentoso en general
+        rango_por_dia = instantanea.conteo_por_dia(desde, hasta)
+        # Mismo mes en todos los años con datos, para saber si este mes fue mas
+        # o menos tormentoso que lo usual (tambien sin recorte geografico)
+        comparacion_anios = instantanea.comparacion_anios(mes)
 
         # Cruce espacial una sola vez para todo el mes
         EARTH_RADIUS_M = 6371000.0
@@ -1497,14 +1210,6 @@ def calendario_mensual(
         return JSONResponse(status_code=400, content={"message": f"Error generando el calendario: {str(e)}"})
 
 
-def _descargas_rango_desde_parquet(desde: date, hasta: date) -> pl.DataFrame:
-    archivo = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
-    cols = ["Fecha", "Hora", "Latitud", "Longitud", "Corriente_kA", "Polaridad_Descargas"]
-    schema = pl.read_parquet_schema(archivo)
-    df = pl.read_parquet(archivo, columns=[c for c in cols if c in schema])
-    return df.filter((pl.col("Fecha") >= desde) & (pl.col("Fecha") <= hasta))
-
-
 @app.post("/api/simulador")
 @con_cache
 def simulador_rango(
@@ -1542,16 +1247,10 @@ def simulador_rango(
                                filtro_estructura, filtro_proteccion)
         df_postes = prep["df"]
 
-        # total_region: toda la region, sin recorte geografico. Decide si el
-        # periodo fue soleado; con Supabase se cuenta en Postgres porque df_rango
-        # trae solo la zona de las estructuras.
-        try:
-            df_rango = _descargas_rango_supabase(d0, d1, _caja_alrededor(df_postes, radio_busqueda_metros))
-            total_region = _total_region_supabase(d0, d1, solo_con_coordenadas=False)
-        except SupabaseNoDisponible as e:
-            _uso_respaldo("/api/simulador", e)
-            df_rango = _descargas_rango_desde_parquet(d0, d1)
-            total_region = len(df_rango)
+        instantanea = _datos()
+        df_rango = instantanea.descargas(d0, d1, _caja_alrededor(df_postes, radio_busqueda_metros))
+        # Toda la region, sin recorte geografico: decide si el periodo fue soleado
+        total_region = instantanea.total(d0, d1, con_coordenadas=False)
 
         EARTH_RADIUS_M = 6371000.0
         limpio = df_rango.with_columns([
@@ -1654,7 +1353,7 @@ def dias_con_impacto_radio(
                                filtro_estructura, filtro_proteccion)
         df_postes = prep["df"]
 
-        arbol, fechas = _arbol_todos_los_rayos()
+        arbol, fechas = _datos().arbol()
         EARTH_RADIUS_M = 6371000.0
         dias = set()
         if arbol is not None and len(df_postes):
@@ -1748,22 +1447,6 @@ def obtener_filtros():
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-def _dias_con_datos_desde_parquet() -> list[str]:
-    df = pl.read_parquet(
-        "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet",
-        columns=["Fecha"]
-    )
-    fechas = df["Fecha"].drop_nulls().unique().sort()
-    return [d.isoformat() for d in fechas.to_list()]
-
-
-def _dias_con_datos_desde_supabase() -> list[str]:
-    filas = consultar(
-        "SELECT DISTINCT fecha FROM public.gpk_descargas_atmosfericas_gold ORDER BY fecha"
-    )
-    return [fecha.isoformat() for (fecha,) in filas]
-
-
 @app.get("/api/rango-fechas")
 @con_cache
 def obtener_rango_fechas():
@@ -1771,11 +1454,7 @@ def obtener_rango_fechas():
     # con la fecha maxima vieja despues de la carga diaria del pipeline, hasta
     # que Render reiniciara el servicio
     try:
-        try:
-            dias = _dias_con_datos_desde_supabase()
-        except SupabaseNoDisponible as e:
-            _uso_respaldo("/api/rango-fechas", e)
-            dias = _dias_con_datos_desde_parquet()
+        dias = _datos().dias_con_datos()
 
         if not dias:
             return JSONResponse(content={"error": "No se encontraron fechas válidas"}, status_code=500)
@@ -1788,6 +1467,13 @@ def obtener_rango_fechas():
     except Exception as e:
         print(f"Error cargando rango de fechas: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
+
+@app.get("/api/fuente-datos")
+def obtener_fuente_datos():
+    """Fuente activa y fecha del dato mas reciente, para la etiqueta del tablero.
+    No dispara consultas a Supabase: informa lo que ya hay en memoria."""
+    return JSONResponse(content=datos.gestor().estado())
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

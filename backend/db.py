@@ -1,10 +1,8 @@
 """Conexion de solo lectura a Supabase (Postgres), por el Transaction pooler.
 
-Migracion incremental del dashboard: mientras se valida endpoint por endpoint,
-cada uno intenta leer de aca primero y cae al parquet local si esto falla (ver
-SupabaseNoDisponible y su uso en backend/main.py). Asi el dashboard sigue
-funcionando igual que hoy mientras SUPABASE_DASHBOARD_DB_URL no este
-configurada, y no se rompe si Supabase esta pausado o el pooler no responde.
+Solo la usa backend/datos.py con FUENTE_DATOS=supabase, para revisar si los
+datos cambiaron y bajar los dias nuevos. Las consultas del tablero se responden
+desde memoria, asi que aca nunca hay mas de una o dos consultas a la vez.
 """
 import os
 import threading
@@ -14,17 +12,15 @@ import psycopg2
 from psycopg2.extensions import QueryCanceledError
 from psycopg2.pool import ThreadedConnectionPool
 
-# Conexiones simultaneas del dashboard contra el pooler. Los endpoints corren en
-# hilos (uno por peticion), asi que este numero es cuantas consultas pueden
-# estar en vuelo a la vez. El Transaction pooler las multiplexa sobre pocas
-# conexiones reales de Postgres, asi que no compite con el limite de 60 del
-# plan Nano.
-MAX_CONEXIONES = 10
+# Conexiones contra el pooler. Solo sincroniza un hilo a la vez, asi que una
+# alcanza. Se mantiene abierta entre revisiones: abrir una nueva cada minuto
+# (TLS y autenticacion, ~6 KB) gastaria mucho mas egress que la consulta.
+MAX_CONEXIONES = 1
 
 # Si Supabase no respondio al crear el pool (por ejemplo, un corte de red justo
 # al arrancar), se vuelve a intentar pasado este tiempo. Antes nunca se
-# reintentaba: un fallo al arrancar dejaba el tablero leyendo el parquet viejo
-# hasta el siguiente reinicio de Render.
+# reintentaba: un fallo al arrancar dejaba el tablero sin sincronizar hasta el
+# siguiente reinicio de Render.
 REINTENTO_POOL_SEGUNDOS = 60
 
 _pool = None
@@ -32,14 +28,13 @@ _ultimo_fallo_pool = None
 _candado_pool = threading.Lock()
 
 # ThreadedConnectionPool no espera cuando se agotan las conexiones: lanza
-# PoolError. Sin este semaforo, la consulta numero MAX_CONEXIONES + 1 fallaria y
-# el fallback la mandaria en silencio al parquet desactualizado. Con el semaforo
-# simplemente espera turno.
+# PoolError. Con este semaforo, la consulta numero MAX_CONEXIONES + 1 espera
+# turno en vez de fallar y dejar el tablero marcado como sin conexion.
 _turnos = threading.BoundedSemaphore(MAX_CONEXIONES)
 
 
 class SupabaseNoDisponible(Exception):
-    """El caller debe capturar esto y usar el parquet local como respaldo."""
+    """El caller debe capturar esto y seguir con los datos que ya tiene."""
 
 
 def _obtener_pool():
@@ -55,8 +50,8 @@ def _obtener_pool():
         if _ultimo_fallo_pool is not None and time.monotonic() - _ultimo_fallo_pool < REINTENTO_POOL_SEGUNDOS:
             return None
         try:
-            # ThreadedConnectionPool (no SimpleConnectionPool) porque cada
-            # peticion corre en su propio hilo.
+            # ThreadedConnectionPool (no SimpleConnectionPool) porque la
+            # sincronizacion corre en hilos aparte de las peticiones.
             #
             # sslmode=require: sin esto, psycopg2 usa "prefer" por defecto, que
             # intenta cifrar pero cae a texto plano en silencio si la
@@ -73,19 +68,21 @@ def _obtener_pool():
             # comparten entre clientes, asi que el SET de arranque no persiste).
             # Si se quiere un tope mas ajustado, va con ALTER ROLE
             # dashboard_readonly SET statement_timeout = '15s' en el SQL Editor.
+            #
+            # keepalives: si la red se corta en silencio (sin cerrar la
+            # conexion), una consulta en curso esperaria para siempre y la
+            # sincronizacion no volveria a correr. Con keepalive el sistema
+            # operativo detecta la conexion muerta en ~6 minutos y la consulta
+            # falla. Una sonda cada 5 minutos de inactividad no pesa en egress.
             _pool = ThreadedConnectionPool(
                 1, MAX_CONEXIONES, dsn,
                 connect_timeout=5,
                 sslmode="require",
+                keepalives=1,
+                keepalives_idle=300,
+                keepalives_interval=30,
+                keepalives_count=3,
             )
-            # El pool de psycopg2 cierra toda conexion por encima de minconn
-            # cuando se devuelve. Con minconn=1, cada rafaga de usuarios volvia a
-            # abrir conexiones (TLS + autenticacion, ~1 s cada una y en la
-            # practica de a una): 10 consultas simultaneas tardaban 8 s. Subirlo
-            # despues de crear el pool hace que conserve las que ya abrio sin
-            # abrir 10 de golpe al arrancar. Medido: las mismas 10 consultas
-            # bajan a 0,6 s.
-            _pool.minconn = MAX_CONEXIONES
             _ultimo_fallo_pool = None
         except Exception as e:
             _ultimo_fallo_pool = time.monotonic()
@@ -94,37 +91,11 @@ def _obtener_pool():
         return _pool
 
 
-def precalentar(cantidad: int) -> None:
-    """Abre conexiones por adelantado para que la primera carga del tablero no
-    pague la apertura. Nunca toma mas turnos de los libres: si ya hay consultas
-    en curso, no les quita conexiones."""
-    p = _obtener_pool()
-    if p is None:
-        return
-    tomadas = []
-    try:
-        for _ in range(cantidad):
-            if not _turnos.acquire(blocking=False):
-                break
-            try:
-                tomadas.append(p.getconn())
-            except Exception:
-                _turnos.release()
-                raise
-    except Exception as e:
-        print(f"No se pudieron abrir conexiones por adelantado: {e}")
-    finally:
-        for conn in tomadas:
-            p.putconn(conn)
-            _turnos.release()
-
-
 def consultar(sql: str, params: tuple | dict = ()) -> list[tuple]:
     """Ejecuta un SELECT contra Supabase y devuelve las filas como tuplas.
 
     Levanta SupabaseNoDisponible si la variable de entorno no esta configurada,
-    si no se pudo conectar, o si la query fallo — en cualquiera de esos casos
-    el caller debe caer al parquet local.
+    si no se pudo conectar, o si la query fallo.
     """
     p = _obtener_pool()
     if p is None:
@@ -133,8 +104,8 @@ def consultar(sql: str, params: tuple | dict = ()) -> list[tuple]:
     with _turnos:
         # Dos intentos: el pooler cierra conexiones que quedan ociosas, y el
         # pool de psycopg2 no se entera hasta usarlas. Una conexion muerta se
-        # descarta y se reintenta una vez con otra nueva, en vez de mandar esa
-        # peticion al parquet viejo por una desconexion que no es una caida.
+        # descarta y se reintenta una vez con otra nueva, en vez de marcar el
+        # tablero sin conexion por una desconexion que no es una caida.
         for intento in (1, 2):
             conn = None
             try:
