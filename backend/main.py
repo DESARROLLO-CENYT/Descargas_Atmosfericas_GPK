@@ -10,17 +10,31 @@ import io
 import json
 import math
 import os
+import threading
 import traceback
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 import pandas as pd
 import uvicorn
 
-from backend.db import consultar, SupabaseNoDisponible
+from backend.db import consultar, precalentar, SupabaseNoDisponible
 from backend.informe import construir_informe
 
 load_dotenv()  # en Render las variables ya vienen del entorno; esto solo pega en local
 
-app = FastAPI(title="App Descargas Atmosféricas 2026")
+
+@asynccontextmanager
+async def ciclo_de_vida(app):
+    # Render duerme el servicio tras 15 min sin trafico. Al despertar, el primer
+    # usuario pagaba abrir conexiones, leer los Excel y armar el arbol de rayos.
+    # Se adelanta en segundo plano: el servidor atiende de inmediato, y quien
+    # llegue mientras tanto espera esa misma preparacion en vez de repetirla
+    # (los caches tienen candado).
+    threading.Thread(target=_preparar_en_segundo_plano, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="App Descargas Atmosféricas 2026", lifespan=ciclo_de_vida)
 
 # Fuentes de datos. El maestro manda la jerarquia de filtros y el inventario
 # las estructuras; se cruzan por circuito (ver /api/procesar)
@@ -223,6 +237,7 @@ def _segundos_desde_medianoche(hora) -> int | None:
 # en el fallback.
 _arbol_rayos_cache = None
 _arbol_rayos_firma = None
+_candado_arbol = threading.Lock()
 
 
 def _arbol_desde_supabase():
@@ -290,18 +305,30 @@ def _arbol_desde_parquet():
 def _arbol_todos_los_rayos():
     """Devuelve (BallTree, lista_de_fechas) alineados, o (None, None) si vacio."""
     global _arbol_rayos_cache, _arbol_rayos_firma
+    # Con candado: si dos usuarios llegan juntos con el cache vacio, el segundo
+    # espera y reusa el arbol del primero en vez de bajar los rayos dos veces
+    with _candado_arbol:
+        try:
+            firma, arbol, fechas = _arbol_desde_supabase()
+        except SupabaseNoDisponible as e:
+            print(f"Supabase no disponible para el arbol de rayos, uso el parquet local: {e}")
+            firma, arbol, fechas = _arbol_desde_parquet()
+
+        if firma is None:
+            return None, None
+
+        _arbol_rayos_cache = (arbol, fechas)
+        _arbol_rayos_firma = firma
+        return _arbol_rayos_cache
+
+
+def _preparar_en_segundo_plano():
     try:
-        firma, arbol, fechas = _arbol_desde_supabase()
-    except SupabaseNoDisponible as e:
-        print(f"Supabase no disponible para el arbol de rayos, uso el parquet local: {e}")
-        firma, arbol, fechas = _arbol_desde_parquet()
-
-    if firma is None:
-        return None, None
-
-    _arbol_rayos_cache = (arbol, fechas)
-    _arbol_rayos_firma = firma
-    return _arbol_rayos_cache
+        precalentar(4)
+        construir_catalogo()
+        _arbol_todos_los_rayos()
+    except Exception as e:
+        print(f"La preparacion en segundo plano no se completo: {e}")
 
 
 def detalle_desde_fila(fila: dict) -> list:
@@ -331,6 +358,7 @@ def detalle_desde_fila(fila: dict) -> list:
 # vez de servir datos viejos hasta el proximo reinicio.
 _cache_catalogo = None
 _firma_catalogo = None
+_candado_catalogo = threading.Lock()
 
 
 def _firma_archivos():
@@ -387,9 +415,16 @@ def construir_catalogo():
     """
     global _cache_catalogo, _firma_catalogo
     firma = _firma_archivos()
-    if _cache_catalogo is not None and _firma_catalogo == firma:
+    # Con candado: si dos usuarios llegan juntos con el cache vacio, el segundo
+    # espera el catalogo del primero en vez de releer los dos Excel en paralelo
+    with _candado_catalogo:
+        if _cache_catalogo is None or _firma_catalogo != firma:
+            _cache_catalogo = _cruzar_inventario_y_maestro()
+            _firma_catalogo = firma
         return _cache_catalogo
 
+
+def _cruzar_inventario_y_maestro():
     df_loc = pd.read_excel(ARCHIVO_LOCALIZACIONES)
     df_loc = df_loc.dropna(subset=['CAMPO', 'LOCACION / CIRCUITO', 'PORTICO / SWG / TRAMO'])
     # Filtro solicitado por usuario: CLASIF2 == "CIRCUITOS"
@@ -458,23 +493,41 @@ def construir_catalogo():
 
     estructuras.sort(key=lambda e: (e["tag"], e["locacion"]))
 
-    _cache_catalogo = {
+    return {
         "jerarquia": jerarquia,
         "estructuras": estructuras,
         "sin_asignar": [{"portico": c, "estructuras": n} for c, n in sorted(sin_asignar.items())]
     }
-    _firma_catalogo = firma
-    return _cache_catalogo
 
 
-def preparar_postes(filtro_campo="", filtro_locacion="", filtro_portico="",
-                    filtro_estructura="", filtro_proteccion=""):
-    """Lee el inventario y devuelve las estructuras que pasan los filtros.
+_cache_inventario = None
+_firma_inventario = None
+_candado_inventario = threading.Lock()
 
-    Vive fuera de /api/procesar porque el calendario necesita exactamente el
-    mismo recorte: si cada endpoint filtrara por su cuenta, terminarian
-    describiendo universos distintos sin que nadie lo note.
+
+def _inventario_base():
+    """Inventario leido y limpio (coordenadas e identidad unica), sin filtros.
+
+    Leer el Excel y limpiar las coordenadas fila por fila tarda ~0,4 s en una
+    laptop, y cada carga del tablero lo repetia cuatro veces (mapa, calendario,
+    simulador y dias con impacto). En Render, con 0,1 de CPU, eso son segundos
+    por carga. Se vuelve a leer solo si el archivo cambia de fecha de
+    modificacion. Nadie modifica lo que devuelve: los filtros crean tablas
+    nuevas.
     """
+    global _cache_inventario, _firma_inventario
+    try:
+        firma = os.path.getmtime(ARCHIVO_INVENTARIO)
+    except OSError:
+        firma = None
+    with _candado_inventario:
+        if _cache_inventario is None or firma is None or firma != _firma_inventario:
+            _cache_inventario = _leer_inventario()
+            _firma_inventario = firma
+        return _cache_inventario
+
+
+def _leer_inventario():
     try:
         # Se guarda el inventario crudo aparte: el recorte deja unas pocas
         # columnas y el panel de detalle necesita la fila entera
@@ -525,6 +578,25 @@ def preparar_postes(filtro_campo="", filtro_locacion="", filtro_portico="",
         )
     else:
         df_postes = df_postes.with_columns(tag_limpio.alias("id_estructura"))
+
+    return {"df": df_postes, "crudo": df_inv_crudo, "col_id": id_poste_col,
+            "col_circuito": circuito_col, "col_dps": dps_col}
+
+
+def preparar_postes(filtro_campo="", filtro_locacion="", filtro_portico="",
+                    filtro_estructura="", filtro_proteccion=""):
+    """Devuelve las estructuras del inventario que pasan los filtros.
+
+    Vive fuera de /api/procesar porque el calendario necesita exactamente el
+    mismo recorte: si cada endpoint filtrara por su cuenta, terminarian
+    describiendo universos distintos sin que nadie lo note.
+    """
+    base = _inventario_base()
+    df_postes = base["df"]
+    df_inv_crudo = base["crudo"]
+    id_poste_col = base["col_id"]
+    circuito_col = base["col_circuito"]
+    dps_col = base["col_dps"]
 
     # Filtros de ubicacion. Los cuatro niveles (campo, locacion, portico y
     # estructura) son independientes entre si: el frontend los mantiene
@@ -770,8 +842,14 @@ def _descargas_desde_parquet(fecha_inicio: date | None, fecha_fin: date | None) 
         raise HTTPException(status_code=400, detail=f"No se pudo leer el archivo de descargas local: {str(e)}")
 
 
+# Los endpoints que consultan datos son "def" y no "async def" a proposito.
+# Adentro todo es bloqueante (psycopg2, Polars, BallTree): dentro de un
+# "async def" eso frena el unico hilo del servidor, y cada usuario esperaba a
+# que terminara el anterior. Medido: una consulta trivial tardaba 11 s si otro
+# usuario acababa de pedir 5 años. Con "def", FastAPI corre cada peticion en su
+# propio hilo y las atiende en paralelo.
 @app.post("/api/procesar")
-async def procesar_datos(
+def procesar_datos(
     radio_busqueda_metros: float = Form(1000.0),
     fecha_inicio: str = Form(None),
     fecha_fin: str = Form(None),
@@ -1099,7 +1177,7 @@ def _calendario_datos_desde_parquet(mes: int, desde: date, hasta: date):
 
 
 @app.post("/api/calendario")
-async def calendario_mensual(
+def calendario_mensual(
     anio: int = Form(...),
     mes: int = Form(...),
     radio_busqueda_metros: float = Form(1000.0),
@@ -1256,7 +1334,7 @@ def _descargas_rango_desde_parquet(desde: date, hasta: date) -> pl.DataFrame:
 
 
 @app.post("/api/simulador")
-async def simulador_rango(
+def simulador_rango(
     fecha_inicio: str = Form(...),
     fecha_fin: str = Form(...),
     radio_busqueda_metros: float = Form(1000.0),
@@ -1381,7 +1459,7 @@ async def simulador_rango(
 
 
 @app.post("/api/dias-radio")
-async def dias_con_impacto_radio(
+def dias_con_impacto_radio(
     radio_busqueda_metros: float = Form(1000.0),
     filtro_campo: str = Form(""),
     filtro_locacion: str = Form(""),
@@ -1422,7 +1500,7 @@ async def dias_con_impacto_radio(
 
 
 @app.post("/api/exportar")
-async def exportar_informe(
+def exportar_informe(
     radio_busqueda_metros: float = Form(1000.0),
     fecha_inicio: str = Form(None),
     fecha_fin: str = Form(None),
@@ -1438,7 +1516,7 @@ async def exportar_informe(
     regla del cruce, el informe la hereda sin tener que tocarse. Por eso no
     valida el radio aca: lo hace procesar_datos y la excepcion sube sola.
     """
-    respuesta = await procesar_datos(
+    respuesta = procesar_datos(
         radio_busqueda_metros=radio_busqueda_metros,
         fecha_inicio=fecha_inicio,
         fecha_fin=fecha_fin,
@@ -1480,7 +1558,7 @@ async def exportar_informe(
 
 
 @app.get("/api/filtros")
-async def obtener_filtros():
+def obtener_filtros():
     # Devuelve la jerarquia y el catalogo de estructuras en la misma respuesta:
     # el buscador necesita las dos cosas a la vez para poder resolver la
     # ubicacion de una estructura sin volver a consultar al servidor
@@ -1514,7 +1592,7 @@ def _dias_con_datos_desde_supabase() -> list[str]:
 
 
 @app.get("/api/rango-fechas")
-async def obtener_rango_fechas():
+def obtener_rango_fechas():
     # Se cachea porque la fuente de datos no cambia entre peticiones y
     # recorrerla completa en cada carga del calendario es caro
     global _cache_rango_fechas
