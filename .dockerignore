@@ -13,15 +13,18 @@
 README.md
 MEJORAS_PENDIENTES.md
 
-# Copias de respaldo y archivos de trabajo que no son fuente de datos
-*.BACKUP_*.xlsx
-Localizaciones_Corregidas.xlsx
-~$*.xlsx
-~$*.xls
+# Copias de respaldo y archivos de trabajo que no son fuente de datos.
+# Con ** porque los datos viven en datos/ y un patron sin barra solo mira
+# la raiz del contexto.
+**/*.BACKUP_*.xlsx
+**/Localizaciones_Corregidas.xlsx
+**/~$*.xlsx
+**/~$*.xls
 
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 venv/
 .venv/
 env/
@@ -36,3 +39,7 @@ env/
 tests/
 scripts/
 requirements-dev.txt
+
+# Lanzadores de Windows: solo sirven en la maquina del usuario
+Iniciar_Dashboard.bat
+iniciar_dashboard.ps1
