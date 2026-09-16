@@ -252,10 +252,20 @@ class GestorDatos:
         hasta = inst.fecha_max.strftime("%d/%m/%Y") if inst.fecha_max else "—"
         sincronizacion = (self._ultima_sincronizacion.isoformat(timespec="seconds")
                           if self._ultima_sincronizacion else None)
+        # Las dos fuentes sanas se nombran y nada mas. El parquet NO es data de
+        # prueba ni inventada: son los mismos datos reales que publica el
+        # pipeline, solo que congelados en la copia del repositorio en vez de
+        # venir en vivo. Llamarlos "de prueba" hacia dudar de un tablero que
+        # estaba bien. La fecha del ultimo dato tampoco va aca: se lee en los
+        # filtros y en el calendario, y en la etiqueta solo invitaba a leerla
+        # como si los datos estuvieran incompletos.
+        #
+        # En los estados con problema la fecha si se queda: ahi es el dato que
+        # importa, porque dice hasta donde alcanza lo que se esta viendo.
         if self.fuente == "parquet":
-            estado, mensaje = "prueba", f"Datos de prueba (parquet) · hasta {hasta}"
+            estado, mensaje = "local", "Data Local (Parquet)"
         elif self._conectado:
-            estado, mensaje = "ok", f"Base de datos · hasta {hasta}"
+            estado, mensaje = "ok", "Base de datos (Supabase)"
         elif inst.sincronizada:
             estado, mensaje = "sin_conexion", f"Sin conexión con la base · datos hasta {hasta}"
         else:

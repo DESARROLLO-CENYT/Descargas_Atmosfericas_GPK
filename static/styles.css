@@ -695,7 +695,7 @@ input[type="date"]::-webkit-calendar-picker-indicator {
     flex-shrink: 0;
 }
 .fuente-datos[data-estado="ok"] { color: var(--success); }
-.fuente-datos[data-estado="prueba"] { color: #93c5fd; border-color: rgba(147, 197, 253, 0.35); }
+.fuente-datos[data-estado="local"] { color: #93c5fd; border-color: rgba(147, 197, 253, 0.35); }
 .fuente-datos[data-estado="respaldo"],
 .fuente-datos[data-estado="sin_conexion"] {
     color: var(--warning);

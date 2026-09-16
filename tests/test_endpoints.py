@@ -93,4 +93,4 @@ def test_etiqueta_de_la_fuente(cliente, nuevo_gestor, monkeypatch):
     fuente = cliente.get("/api/fuente-datos").json()
 
     assert fuente["fuente"] == "parquet"
-    assert fuente["mensaje"].startswith("Datos de prueba (parquet)")
+    assert fuente["mensaje"] == "Data Local (Parquet)"

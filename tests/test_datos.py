@@ -92,7 +92,23 @@ def test_fuente_parquet_nunca_consulta_supabase(nuevo_gestor, df_completo):
     gestor.instantanea()
 
     assert remoto.llamadas == []
-    assert gestor.estado()["estado"] == "prueba"
+    assert gestor.estado()["estado"] == "local"
+
+
+def test_la_etiqueta_solo_nombra_la_fuente(nuevo_gestor, df_completo):
+    """Las dos fuentes sanas se nombran y nada mas, sin fecha.
+
+    El parquet no es data de prueba: son los mismos datos reales del pipeline,
+    congelados en la copia del repositorio. La etiqueta anterior ("Datos de
+    prueba (parquet) · hasta ...") hacia dudar de un tablero que estaba bien.
+    """
+    local = nuevo_gestor("parquet", PARQUET, RemotoFalso(df_completo))
+    local.instantanea()
+    assert local.estado()["mensaje"] == "Data Local (Parquet)"
+
+    base = nuevo_gestor("supabase", PARQUET, RemotoFalso(df_completo))
+    base.instantanea()
+    assert base.estado()["mensaje"] == "Base de datos (Supabase)"
 
 
 def test_fuente_parquet_recarga_si_cambia_el_archivo(nuevo_gestor, parquet_viejo, tmp_path, ultimos_dias):
