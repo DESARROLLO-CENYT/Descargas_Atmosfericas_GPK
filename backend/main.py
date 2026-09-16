@@ -40,8 +40,9 @@ app = FastAPI(title="App Descargas Atmosféricas 2026", lifespan=ciclo_de_vida)
 
 # Fuentes de datos. El maestro manda la jerarquia de filtros y el inventario
 # las estructuras; se cruzan por circuito (ver /api/procesar)
-ARCHIVO_LOCALIZACIONES = "Localizaciones_Final.xlsx"
-ARCHIVO_INVENTARIO = "Inventario_Estructuras_y_DPS_Final.xlsx"
+CARPETA_DATOS = "datos"
+ARCHIVO_LOCALIZACIONES = f"{CARPETA_DATOS}/Localizaciones_Final.xlsx"
+ARCHIVO_INVENTARIO = f"{CARPETA_DATOS}/Inventario_Estructuras_y_DPS_Final.xlsx"
 
 # Tope del radio de busqueda.
 #

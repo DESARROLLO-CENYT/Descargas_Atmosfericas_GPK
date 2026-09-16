@@ -23,7 +23,7 @@ def huella_actual():
 
 def test_rechaza_un_archivo_que_no_es_parquet(huella_actual):
     antes = huella_actual()
-    resultado = correr(RAIZ / "Localizaciones_Final.xlsx")
+    resultado = correr(RAIZ / "datos" / "Localizaciones_Final.xlsx")
     assert resultado.returncode == 1
     assert "No se pudo leer" in resultado.stdout + resultado.stderr
     assert huella_actual() == antes

@@ -38,7 +38,7 @@ from backend import lectura_parquet
 from backend.db import SupabaseNoDisponible, consultar
 from backend.lectura_parquet import COLUMNAS
 
-ARCHIVO_PARQUET = "Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
+ARCHIVO_PARQUET = "datos/Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
 FUENTES = ("parquet", "supabase")
 
 # Cada cuanto se le pregunta a Supabase si los datos cambiaron, como maximo, y
