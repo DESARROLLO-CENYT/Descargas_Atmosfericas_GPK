@@ -22,67 +22,103 @@ def esperar(condicion, segundos=10):
     return False
 
 
-def test_baja_solo_los_dias_nuevos(nuevo_gestor, parquet_viejo, df_completo, ultimos_dias, caja_zona, tmp_path):
+def intentar(gestor):
+    """instantanea() sin propagar DatosNoDisponibles: sirve para disparar el
+    reintento en segundo plano mientras la base sigue sin datos."""
+    try:
+        return gestor.instantanea()
+    except datos.DatosNoDisponibles:
+        return None
+
+
+def revisar_ya(gestor):
+    """Corre la revision de cambios ahora y en este hilo, sin esperar el minuto."""
+    assert gestor._revisando.acquire(blocking=False)
+    gestor._revisar_en_segundo_plano()
+
+
+def test_supabase_arranca_vacio_y_trae_todo_de_la_base(nuevo_gestor, df_completo, caja_zona, tmp_path):
     remoto = RemotoFalso(df_completo)
-    gestor = nuevo_gestor("supabase", parquet_viejo, remoto)
+    # Ruta inexistente a proposito: en produccion la imagen no trae parquet
+    gestor = nuevo_gestor("supabase", tmp_path / "no_existe.parquet", remoto)
 
     inst = gestor.instantanea()
 
     assert remoto.llamadas == ["huella_global", "huellas_por_mes", "huellas_por_dia", "filas_zona"]
     assert iguales(inst, instantanea_directa(PARQUET, caja_zona(), tmp_path))
-    assert inst.fecha_max == max(ultimos_dias)
     assert gestor.estado()["estado"] == "ok"
+
+
+def test_baja_solo_los_dias_nuevos(nuevo_gestor, df_completo, ultimos_dias, caja_zona, tmp_path):
+    # La base todavia no tiene los ultimos 10 dias; despues el pipeline los publica
+    remoto = RemotoFalso(df_completo.filter(pl.col("Fecha") < min(ultimos_dias)))
+    gestor = nuevo_gestor("supabase", None, remoto)
+    assert gestor.instantanea().fecha_max < min(ultimos_dias)
+
+    remoto.cambiar_datos(df_completo)
+    remoto.llamadas.clear()
+    remoto.dias_bajados.clear()
+    revisar_ya(gestor)
+
+    nuevos = set(df_completo.filter(pl.col("Fecha").is_in(ultimos_dias))["Fecha"].unique())
+    assert set(remoto.dias_bajados) == nuevos
+    assert remoto.llamadas == ["huella_global", "huellas_por_mes", "huellas_por_dia", "filas_zona"]
+    assert iguales(gestor.instantanea(), instantanea_directa(PARQUET, caja_zona(), tmp_path))
 
 
 def test_si_nada_cambio_hace_una_sola_consulta(nuevo_gestor, df_completo):
     remoto = RemotoFalso(df_completo)
-    gestor = nuevo_gestor("supabase", PARQUET, remoto)
+    gestor = nuevo_gestor("supabase", None, remoto)
+    gestor.instantanea()
 
-    inst = gestor.instantanea()
+    remoto.llamadas.clear()
+    revisar_ya(gestor)
 
     assert remoto.llamadas == ["huella_global"]
-    assert inst.sincronizada
     assert gestor.estado()["estado"] == "ok"
 
 
 def test_detecta_dias_recargados_y_borrados(nuevo_gestor, df_completo, caja_zona, tmp_path):
+    remoto = RemotoFalso(df_completo)
+    gestor = nuevo_gestor("supabase", None, remoto)
+    gestor.instantanea()
+
     # El pipeline recargo un dia con una fila menos y borro otro entero
     quitada = df_completo.with_row_index("i").filter(pl.col("Fecha") == FECHA_DE_PRUEBA).row(0)[0]
     borrado = date(2022, 5, 10)
     modificado = (df_completo.with_row_index("i")
                   .filter((pl.col("i") != quitada) & (pl.col("Fecha") != borrado))
                   .drop("i"))
-    remoto = RemotoFalso(modificado)
-    gestor = nuevo_gestor("supabase", PARQUET, remoto)
+    remoto.cambiar_datos(modificado)
+    revisar_ya(gestor)
 
     inst = gestor.instantanea()
-
     assert iguales(inst, instantanea_directa(modificado, caja_zona(), tmp_path))
     assert borrado not in inst.huellas
     rayos_originales = df_completo.filter(pl.col("Fecha") == FECHA_DE_PRUEBA).height
     assert inst.huellas[FECHA_DE_PRUEBA][0] == rayos_originales - 1
 
 
-def test_caida_recuperacion_y_nueva_caida(nuevo_gestor, parquet_viejo, df_completo, ultimos_dias, monkeypatch):
+def test_caida_al_arrancar_recuperacion_y_nueva_caida(nuevo_gestor, df_completo, monkeypatch):
     remoto = RemotoFalso(df_completo)
     remoto.caido = True
-    gestor = nuevo_gestor("supabase", parquet_viejo, remoto)
+    gestor = nuevo_gestor("supabase", None, remoto)
 
-    # Supabase caido al arrancar: responde con la copia y lo avisa
-    inst = gestor.instantanea()
-    assert inst.fecha_max < min(ultimos_dias)
-    assert gestor.estado()["estado"] == "respaldo"
+    # Sin base al arrancar no hay copia a la que caer: se dice, no se inventa
+    with pytest.raises(datos.DatosNoDisponibles):
+        gestor.instantanea()
+    assert gestor.estado()["estado"] == "sin_datos"
 
-    # Vuelve: la siguiente peticion dispara la revision en segundo plano
+    # Vuelve: la siguiente peticion dispara el reintento en segundo plano
     monkeypatch.setattr(datos, "REVISION_SEGUNDOS", 0)
     remoto.caido = False
-    assert esperar(lambda: gestor.instantanea() and gestor.estado()["estado"] == "ok")
-    assert gestor.instantanea().fecha_max == max(ultimos_dias)
+    assert esperar(lambda: intentar(gestor) is not None and gestor.estado()["estado"] == "ok")
+    assert gestor.instantanea().fecha_max == df_completo["Fecha"].max()
 
-    # Se cae de nuevo: sigue con lo ya sincronizado, que es mas nuevo que la copia
+    # Se cae de nuevo: sigue sirviendo lo ya traido y lo avisa
     remoto.caido = True
-    assert esperar(lambda: gestor.instantanea() and gestor.estado()["estado"] == "sin_conexion")
-    assert gestor.instantanea().fecha_max == max(ultimos_dias)
+    assert esperar(lambda: intentar(gestor) is not None and gestor.estado()["estado"] == "sin_conexion")
+    assert gestor.instantanea().fecha_max == df_completo["Fecha"].max()
 
 
 def test_fuente_parquet_nunca_consulta_supabase(nuevo_gestor, df_completo):
@@ -106,7 +142,7 @@ def test_la_etiqueta_solo_nombra_la_fuente(nuevo_gestor, df_completo):
     local.instantanea()
     assert local.estado()["mensaje"] == "Data Local (Parquet)"
 
-    base = nuevo_gestor("supabase", PARQUET, RemotoFalso(df_completo))
+    base = nuevo_gestor("supabase", None, RemotoFalso(df_completo))
     base.instantanea()
     assert base.estado()["mensaje"] == "Base de datos (Supabase)"
 

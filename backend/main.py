@@ -38,6 +38,13 @@ async def ciclo_de_vida(app):
 
 app = FastAPI(title="App Descargas Atmosféricas 2026", lifespan=ciclo_de_vida)
 
+
+@app.exception_handler(datos.DatosNoDisponibles)
+def _sin_datos(_request, error):
+    # 503 y no 200 con listas vacias: un tablero sin datos tiene que decirlo, no
+    # mostrar "0 descargas". "message" es el campo que el frontend muestra.
+    return JSONResponse(status_code=503, content={"message": str(error)})
+
 # Fuentes de datos. El maestro manda la jerarquia de filtros y el inventario
 # las estructuras; se cruzan por circuito (ver /api/procesar)
 CARPETA_DATOS = "datos"

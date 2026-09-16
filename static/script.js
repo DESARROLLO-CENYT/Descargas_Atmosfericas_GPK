@@ -60,11 +60,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let porticosSinUbicacion = [];
 
     // ---- Fuente de datos ----
-    // Etiqueta junto al logo con la fuente activa (parquet de prueba o base de
-    // datos) y la fecha del dato mas reciente, para que nunca se confundan datos
-    // de prueba con los de produccion. Se actualiza al cargar y despues de cada
-    // analisis; no consulta sola cada tanto, para no mantener despierto el
-    // servidor ni gastar consultas con la pestaña abierta sin uso.
+    // Etiqueta junto al logo con la fuente activa (parquet local o base de
+    // datos), para saber siempre de donde salen los datos. Se actualiza al
+    // cargar, despues de cada analisis y cuando una consulta falla; no consulta
+    // sola cada tanto, para no mantener despierto el servidor ni gastar
+    // consultas con la pestaña abierta sin uso.
     const etiquetaFuente = document.createElement('span');
     etiquetaFuente.className = 'fuente-datos';
     etiquetaFuente.setAttribute('role', 'status');
@@ -87,6 +87,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     actualizarFuenteDatos();
+
+    async function mensajeDelServidor(resp, porDefecto) {
+        try {
+            return (await resp.json()).message || porDefecto;
+        } catch (e) {
+            return porDefecto;
+        }
+    }
 
     async function loadFiltros() {
         try {
@@ -512,6 +520,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (error) {
             // Sin rango se dejan los input date nativos, que siguen siendo usables
             console.error("Error cargando rango de fechas:", error);
+            actualizarFuenteDatos();
             const legend = document.getElementById('dateLegend');
             if (legend) legend.style.display = 'none';
             return;
@@ -776,6 +785,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (miPeticion !== peticionActual) return;
             console.error(error);
             showStatus(error.message);
+            actualizarFuenteDatos();
         } finally {
             // Solo la peticion vigente devuelve la UI a su estado normal, para
             // que una respuesta vieja no apague el spinner de la que sigue viva
@@ -912,7 +922,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const resp = await fetch('/api/calendario', { method: 'POST', body: cuerpo });
             if (mia !== calPeticion) return;   // llego tarde, ya salio otra
-            if (!resp.ok) throw new Error('No se pudo cargar el calendario');
+            if (!resp.ok) throw new Error(await mensajeDelServidor(resp, 'No se pudo cargar el calendario'));
             renderCalendario(await resp.json());
         } catch (error) {
             console.error(error);
@@ -971,7 +981,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // cuerpoFiltros ya incluye fecha_inicio, fecha_fin, radio y filtros
             const resp = await fetch('/api/simulador', { method: 'POST', body: cuerpoFiltros() });
             if (mia !== simPeticion) return;
-            if (!resp.ok) throw new Error('No se pudo cargar el simulador');
+            if (!resp.ok) throw new Error(await mensajeDelServidor(resp, 'No se pudo cargar el simulador'));
             renderSimulador(await resp.json());
         } catch (error) {
             console.error(error);

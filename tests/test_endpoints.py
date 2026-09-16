@@ -55,15 +55,15 @@ def respuestas(cliente, lista):
     return salida
 
 
-def test_parquet_y_supabase_responden_igual(cliente, filtros, nuevo_gestor, parquet_viejo, df_completo, monkeypatch):
+def test_parquet_y_supabase_responden_igual(cliente, filtros, nuevo_gestor, df_completo, monkeypatch):
     lista = casos(filtros)
 
     monkeypatch.setattr(datos, "_gestor", nuevo_gestor("parquet", datos.ARCHIVO_PARQUET))
     con_parquet = respuestas(cliente, lista)
 
-    # Supabase simulado partiendo de una copia vieja: tiene que sincronizar
+    # Supabase simulado arrancando vacio, como en produccion: trae todo de la base
     remoto = RemotoFalso(df_completo)
-    gestor = nuevo_gestor("supabase", parquet_viejo, remoto)
+    gestor = nuevo_gestor("supabase", None, remoto)
     monkeypatch.setattr(datos, "_gestor", gestor)
     con_supabase = respuestas(cliente, lista)
 
@@ -94,3 +94,19 @@ def test_etiqueta_de_la_fuente(cliente, nuevo_gestor, monkeypatch):
 
     assert fuente["fuente"] == "parquet"
     assert fuente["mensaje"] == "Data Local (Parquet)"
+
+
+def test_sin_base_al_arrancar_responde_503_con_mensaje(cliente, filtros, nuevo_gestor, df_completo, monkeypatch):
+    remoto = RemotoFalso(df_completo)
+    remoto.caido = True
+    monkeypatch.setattr(datos, "_gestor", nuevo_gestor("supabase", None, remoto))
+
+    for metodo, ruta, cuerpo in casos(filtros):
+        r = cliente.get(ruta) if metodo == "get" else cliente.post(ruta, data=cuerpo)
+        # Nunca un 200 con cero rayos: el tablero tiene que decir que no hay datos
+        assert r.status_code == 503, (ruta, r.status_code)
+        assert "Sin conexión con la base de datos" in r.json()["message"]
+
+    assert cliente.get("/api/fuente-datos").json()["estado"] == "sin_datos"
+    # El catalogo sale de los Excel, no de la base: sigue disponible
+    assert cliente.get("/api/filtros").status_code == 200

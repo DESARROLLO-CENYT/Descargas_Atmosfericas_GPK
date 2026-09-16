@@ -6,23 +6,18 @@
 .env.*
 !.env.example
 
-# === DATOS: AQUI SE VERSIONAN A PROPOSITO ===
-# Decision opuesta a la del pipeline, y conviene entender por que.
+# === DATOS ===
+# El parquet del historico es SOLO para trabajar en local (pruebas,
+# optimizaciones, mejoras del tablero). Produccion lee siempre de Supabase y la
+# imagen no lo trae, asi que no tiene por que estar en git: cada quien lo genera
+# desde el Gold del pipeline con scripts/actualizar_parquet.py.
+datos/*.parquet
 #
-# El pipeline ignora Data/ entero: son cientos de MB que se regeneran cada dia.
-# El tablero, en cambio, SI versiona los tres archivos de datos/ porque son su
-# entrada y tienen que viajar dentro de la imagen de Docker:
+# Los dos Excel (inventario y localizaciones) SI se versionan: no estan en
+# Supabase, este repositorio es su unica fuente y viajan en la imagen.
 #
-#   - El parquet (7,2 MB) es la foto de partida. Incluso con
-#     FUENTE_DATOS=supabase, el tablero arranca con el y solo le pide a la base
-#     los dias que cambiaron. Sin el, cada arranque en frio de Render bajaria
-#     la zona completa (38.857 filas, ~3,4 MB frente a ~6 KB): con 10
-#     arranques al dia, ~1 GB de los 5 GB de egress del mes.
-#   - Los dos Excel (inventario y localizaciones) no estan en Supabase: este
-#     repositorio es su unica fuente.
-#
-# Lo que si se excluye son respaldos y versiones de trabajo, que duplican megas
-# en el historial sin aportar nada.
+# Se excluyen respaldos y versiones de trabajo, que duplican megas en el
+# historial sin aportar nada.
 *.BACKUP_*.xlsx
 Localizaciones_Corregidas.xlsx
 *.parquet.tmp

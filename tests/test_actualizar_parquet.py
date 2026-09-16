@@ -17,7 +17,7 @@ def correr(*argumentos):
 
 
 @pytest.fixture
-def huella_actual():
+def huella_actual(parquet_local):
     return lambda: hashlib.sha256(PARQUET.read_bytes()).hexdigest()
 
 

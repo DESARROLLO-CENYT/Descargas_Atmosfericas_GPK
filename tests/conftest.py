@@ -42,9 +42,14 @@ class RemotoFalso:
     backend.datos.RemotoSupabase. Registra cada llamada."""
 
     def __init__(self, df: pl.DataFrame):
-        self.df = df.filter(pl.col("Fecha").is_not_null())
+        self.cambiar_datos(df)
         self.caido = False
         self.llamadas = []
+        self.dias_bajados = []
+
+    def cambiar_datos(self, df: pl.DataFrame):
+        """Lo que haria el pipeline al publicar: la base pasa a tener estos datos."""
+        self.df = df.filter(pl.col("Fecha").is_not_null())
 
     def _registrar(self, nombre):
         if self.caido:
@@ -69,6 +74,7 @@ class RemotoFalso:
 
     def filas_zona(self, dias, caja):
         self._registrar("filas_zona")
+        self.dias_bajados.extend(dias)
         return (self.df.select([pl.col(c).cast(t) for c, t in COLUMNAS.items()])
                        .filter(pl.col("Fecha").is_in(dias)
                                & pl.col("Latitud").is_between(caja["la0"], caja["la1"])
@@ -87,9 +93,19 @@ def caja_zona(m):
 
 
 @pytest.fixture(scope="session")
-def df_completo():
-    """Los datos que tendria Supabase: el parquet del repositorio."""
-    return pl.read_parquet(PARQUET)
+def parquet_local():
+    """El parquet vive solo en local (no esta en git). Sin el, las pruebas que lo
+    necesitan se saltan diciendo como generarlo, en vez de fallar sin explicacion."""
+    if not PARQUET.is_file():
+        pytest.skip(f"Falta {datos.ARCHIVO_PARQUET} (solo local, no esta en git). "
+                    "Generalo con: python scripts/actualizar_parquet.py")
+    return PARQUET
+
+
+@pytest.fixture(scope="session")
+def df_completo(parquet_local):
+    """Los datos que tendria Supabase: el parquet local, identico al Gold."""
+    return pl.read_parquet(parquet_local)
 
 
 @pytest.fixture(scope="session")
@@ -100,14 +116,14 @@ def ultimos_dias(df_completo):
 
 @pytest.fixture(scope="session")
 def parquet_viejo(tmp_path_factory, df_completo, ultimos_dias):
-    """Copia sin los ultimos 10 dias: simula la imagen de Render desactualizada."""
+    """Copia sin los ultimos 10 dias: datos desactualizados respecto de la base."""
     ruta = tmp_path_factory.mktemp("datos") / "viejo.parquet"
     df_completo.filter(pl.col("Fecha") < min(ultimos_dias)).write_parquet(ruta)
     return ruta
 
 
 @pytest.fixture
-def nuevo_gestor(m, caja_zona):
+def nuevo_gestor(m, caja_zona, parquet_local):
     def crear(fuente, ruta, remoto=None):
         return datos.GestorDatos(fuente, caja_zona, m._firma_archivos, ruta_parquet=str(ruta), remoto=remoto)
     return crear

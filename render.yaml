@@ -24,6 +24,7 @@ services:
 
     # Variables de entorno: se cargan a mano en el panel de Render
     # (Environment), no aca, porque la URL de Supabase es un secreto.
-    #   FUENTE_DATOS=supabase         sin ella el tablero usa el parquet de la imagen
+    #   FUENTE_DATOS=supabase         ya es el valor por defecto de la imagen;
+    #                                 dejarla explicita evita sorpresas
     #   SUPABASE_DASHBOARD_DB_URL=... usuario dashboard_readonly, puerto 6543
     # El puerto lo inyecta Render en $PORT, que el Dockerfile ya usa en su CMD.

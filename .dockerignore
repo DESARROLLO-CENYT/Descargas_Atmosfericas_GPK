@@ -13,6 +13,11 @@
 README.md
 MEJORAS_PENDIENTES.md
 
+# El parquet es solo para trabajar en local: produccion lee de Supabase. Que
+# no entre en la imagen garantiza que Render no pueda usarlo ni por error.
+**/*.parquet
+**/*.parquet.tmp
+
 # Copias de respaldo y archivos de trabajo que no son fuente de datos.
 # Con ** porque los datos viven en datos/ y un patron sin barra solo mira
 # la raiz del contexto.

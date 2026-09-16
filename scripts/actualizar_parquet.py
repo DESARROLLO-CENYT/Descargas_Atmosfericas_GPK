@@ -103,7 +103,7 @@ def main():
         print(f"  hasta: {actual['hasta']} -> {nuevo['hasta']}")
     else:
         print(f"  filas: {nuevo['filas']:,} | dias: {nuevo['dias']:,} | {nuevo['desde']} a {nuevo['hasta']}")
-    print("Para que la copia llegue a Render (respaldo y punto de partida en modo supabase), commitea el archivo.")
+    print("Es solo para trabajar en local: no va a git ni a la imagen (produccion lee de Supabase).")
 
 
 if __name__ == "__main__":

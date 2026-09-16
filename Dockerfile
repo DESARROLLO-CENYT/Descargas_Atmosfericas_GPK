@@ -29,6 +29,11 @@ COPY . .
 ENV PORT=8000
 EXPOSE 8000
 
+# La imagen es la de produccion: lee de Supabase aunque en Render falte la
+# variable, y sin SUPABASE_DASHBOARD_DB_URL falla al arrancar en vez de mostrar
+# datos de otra fuente. En local, docker-compose.yml la pisa con parquet.
+ENV FUENTE_DATOS=supabase
+
 # Un solo worker a proposito: cada worker tendria su propia copia de los datos,
 # del cache y de la conexion a Supabase, y en el plan Free de Render solo hay
 # 512 MB. La concurrencia la dan los hilos: FastAPI atiende cada peticion en el

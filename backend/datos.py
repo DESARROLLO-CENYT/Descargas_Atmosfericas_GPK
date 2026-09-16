@@ -1,13 +1,15 @@
 """Fuente de datos del tablero: el parquet local o Supabase, segun FUENTE_DATOS.
 
-- parquet (por defecto): lee el parquet del repositorio y nunca se conecta a
-  Supabase, aunque la URL este configurada. Es la fuente para desarrollo y
-  pruebas: no gasta egress. Si el archivo se reemplaza, se recarga solo.
-- supabase: fuente de produccion. Arranca con la copia del parquet que trae la
-  imagen y le pregunta a Supabase solo que dias cambiaron, comparando huellas
-  (primero la global, despues por mes y por dia). Baja unicamente esos dias.
-  Hoy todos los dias del parquet coinciden con la base, asi que un arranque en
-  frio cuesta unos KB en vez de los MB que costaba bajar los rayos.
+- parquet (por defecto): SOLO para trabajar en local. Lee el parquet de datos/,
+  que no esta en git ni en la imagen, y nunca se conecta a Supabase aunque la
+  URL este configurada: no gasta egress. Si el archivo se reemplaza, se recarga
+  solo.
+- supabase: la unica fuente de produccion. La imagen no trae parquet, asi que
+  arranca vacio y trae de la base lo que falta, comparando huellas (primero la
+  global, despues por mes y por dia) y bajando solo los dias distintos. Desde
+  cero eso es la zona completa: ~38 mil filas, ~3,4 MB. Mientras no haya traido
+  nada, las consultas del tablero responden 503 (DatosNoDisponibles) en vez de
+  contestar como si no hubiera rayos.
 
 En las dos fuentes las consultas del tablero se responden desde memoria con el
 mismo codigo, asi que con los mismos datos dan exactamente el mismo resultado.
@@ -64,6 +66,12 @@ _AGREGADOS_SQL = (
 )
 _TABLA = "public.gpk_descargas_atmosfericas_gold"
 _FILTRO_CAJA_SQL = "latitud BETWEEN %(la0)s AND %(la1)s AND longitud BETWEEN %(lo0)s AND %(lo1)s"
+
+
+class DatosNoDisponibles(Exception):
+    """Modo supabase sin ningun dato traido todavia (la base no respondio al
+    arrancar). No hay copia local a la que caer: responder con cero rayos haria
+    creer que no cayo ninguno."""
 
 
 def _huella(n, nc, sc, sla, slo) -> tuple:
@@ -123,6 +131,13 @@ class Instantanea:
         self.fecha_max = max(huellas) if huellas else None
         self._arbol = None
         self._candado_arbol = threading.Lock()
+
+    @classmethod
+    def vacia(cls) -> "Instantanea":
+        """Punto de partida del modo supabase: sin rayos ni dias. Su huella
+        difiere de cualquier base con datos, asi que la primera sincronizacion
+        trae todo."""
+        return cls(pl.DataFrame(schema=COLUMNAS), {}, version=None, sincronizada=False)
 
     def huella_global(self):
         return self.fecha_max, _sumar(self.huellas.values())
@@ -231,7 +246,9 @@ class GestorDatos:
     # ---- lectura ----
 
     def instantanea(self) -> Instantanea:
-        base = (self._firma_parquet(), self._firma_zona())
+        # En modo supabase el parquet no participa: ni existe en la imagen
+        firma_parquet = self._firma_parquet() if self.fuente == "parquet" else None
+        base = (firma_parquet, self._firma_zona())
         if self._inst is None or base != self._base:
             with self._candado:
                 if self._inst is None or base != self._base:
@@ -240,8 +257,12 @@ class GestorDatos:
               and time.monotonic() - self._ultima_revision > REVISION_SEGUNDOS
               and self._revisando.acquire(blocking=False)):
             # En segundo plano: la peticion responde ya con los datos que hay,
-            # y si hubo cambios las siguientes usan la version nueva
+            # y si hubo cambios las siguientes usan la version nueva. Si todavia
+            # no hay datos (la base no respondio al arrancar), esto es el
+            # reintento.
             threading.Thread(target=self._revisar_en_segundo_plano, daemon=True).start()
+        if self.fuente == "supabase" and not self._inst.sincronizada:
+            raise DatosNoDisponibles("Sin conexión con la base de datos. Se reintenta en menos de un minuto.")
         return self._inst
 
     def estado(self) -> dict:
@@ -264,12 +285,13 @@ class GestorDatos:
         # importa, porque dice hasta donde alcanza lo que se esta viendo.
         if self.fuente == "parquet":
             estado, mensaje = "local", "Data Local (Parquet)"
+        elif not inst.sincronizada:
+            # Nunca se trajo nada: no hay fecha que mostrar ni datos que servir
+            estado, mensaje = "sin_datos", "Sin conexión con la base de datos · reintentando"
         elif self._conectado:
             estado, mensaje = "ok", "Base de datos (Supabase)"
-        elif inst.sincronizada:
-            estado, mensaje = "sin_conexion", f"Sin conexión con la base · datos hasta {hasta}"
         else:
-            estado, mensaje = "respaldo", f"Sin conexión con la base · datos de respaldo hasta {hasta}"
+            estado, mensaje = "sin_conexion", f"Sin conexión con la base · datos hasta {hasta}"
         return {"fuente": self.fuente, "estado": estado,
                 "fecha_max": inst.fecha_max.isoformat() if inst.fecha_max else None,
                 "ultima_sincronizacion": sincronizacion, "mensaje": mensaje}
@@ -285,11 +307,14 @@ class GestorDatos:
 
     def _construir(self, base):
         caja = self._caja_zona()
-        supabase = self.fuente == "supabase"
-        zona, huellas = leer_parquet(self._ruta, caja, con_huellas=supabase)
-        inst = Instantanea(zona, huellas, version=("parquet", base), sincronizada=False)
-        if supabase:
-            inst = self._sincronizar(inst, caja)
+        if self.fuente == "parquet":
+            zona, huellas = leer_parquet(self._ruta, caja, con_huellas=False)
+            inst = Instantanea(zona, huellas, version=("parquet", base), sincronizada=False)
+        else:
+            # Se parte de cero y la sincronizacion trae todo lo que falta. Si
+            # la base no responde queda vacia y sin sincronizar: instantanea()
+            # lo convierte en DatosNoDisponibles y la siguiente revision reintenta.
+            inst = self._sincronizar(Instantanea.vacia(), caja)
         self._inst = inst
         self._base = base
 
