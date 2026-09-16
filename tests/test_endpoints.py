@@ -3,7 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend import datos
-from conftest import RemotoFalso
+from conftest import RemotoFalso, terminar_foto
 
 TODO = {"fecha_inicio": "2021-01-01", "fecha_fin": "2026-12-31"}
 
@@ -55,7 +55,7 @@ def respuestas(cliente, lista):
     return salida
 
 
-def test_parquet_y_supabase_responden_igual(cliente, filtros, nuevo_gestor, df_completo, monkeypatch):
+def test_parquet_y_supabase_responden_igual(cliente, filtros, nuevo_gestor, df_completo, monkeypatch, m):
     lista = casos(filtros)
 
     monkeypatch.setattr(datos, "_gestor", nuevo_gestor("parquet", datos.ARCHIVO_PARQUET))
@@ -71,6 +71,24 @@ def test_parquet_y_supabase_responden_igual(cliente, filtros, nuevo_gestor, df_c
     for (metodo, ruta, cuerpo), a, b in zip(lista, con_parquet, con_supabase):
         assert a == b, f"{ruta} {cuerpo}: las respuestas no son identicas"
     assert cliente.get("/api/fuente-datos").json()["estado"] == "ok"
+
+    # Arranque siguiente, como tras dormirse Render: parte de la foto que dejo
+    # el anterior, no baja ninguna fila y responde exactamente igual
+    terminar_foto(gestor)
+    assert remoto.foto is not None
+    remoto.llamadas.clear()
+    desde_foto = nuevo_gestor("supabase", None, remoto)
+    monkeypatch.setattr(datos, "_gestor", desde_foto)
+    # Cache de respuestas vacia: la version de los datos es la misma que en el
+    # arranque anterior, y sin esto responderia de memoria sin usar la foto
+    monkeypatch.setattr(m, "_cache_respuestas", m._CacheRespuestas(m.CACHE_MAX_BYTES))
+    con_foto = respuestas(cliente, lista)
+    terminar_foto(desde_foto)
+
+    assert "filas_zona" not in remoto.llamadas
+    assert remoto.llamadas == ["leer_foto_meta", "leer_foto", "huella_global"]
+    for (metodo, ruta, cuerpo), a, b in zip(lista, con_parquet, con_foto):
+        assert a == b, f"{ruta} {cuerpo}: desde la foto la respuesta no es identica"
 
 
 def test_calendario_y_simulador_cuentan_lo_mismo(cliente, nuevo_gestor, monkeypatch):

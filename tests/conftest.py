@@ -5,8 +5,10 @@ RemotoFalso, que responde las mismas consultas que RemotoSupabase calculandolas
 sobre el parquet del repositorio. Por si algo intentara conectarse igual, la URL
 de Supabase apunta a un puerto local cerrado y falla sin salir a internet.
 """
+import json
 import os
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -46,6 +48,10 @@ class RemotoFalso:
         self.caido = False
         self.llamadas = []
         self.dias_bajados = []
+        # La tabla de la foto: (meta, contenido) como quedaria guardada
+        self.foto = None
+        self.foto_instalada = True   # False: no se aplico sql/001_foto_tablero.sql
+        self.falla_guardar = False
 
     def cambiar_datos(self, df: pl.DataFrame):
         """Lo que haria el pipeline al publicar: la base pasa a tener estos datos."""
@@ -79,6 +85,27 @@ class RemotoFalso:
                        .filter(pl.col("Fecha").is_in(dias)
                                & pl.col("Latitud").is_between(caja["la0"], caja["la1"])
                                & pl.col("Longitud").is_between(caja["lo0"], caja["lo1"])))
+
+    # Mismo contrato que RemotoSupabase: sin tabla (no instalada) leer da None,
+    # como hace _consulta_foto, y guardar falla, como la funcion inexistente
+    def leer_foto_meta(self):
+        self._registrar("leer_foto_meta")
+        if not self.foto_instalada or self.foto is None:
+            return None
+        return dict(self.foto[0])
+
+    def leer_foto(self):
+        self._registrar("leer_foto")
+        if not self.foto_instalada or self.foto is None:
+            return None
+        return self.foto[1]
+
+    def guardar_foto(self, formato, caja, huella, contenido):
+        self._registrar("guardar_foto")
+        if not self.foto_instalada or self.falla_guardar:
+            raise SupabaseNoDisponible("simulado: no se pudo guardar la foto")
+        # Por JSON, como la columna jsonb: la caja vuelve como la leeria la base
+        self.foto = ({"formato": formato, "caja": json.loads(json.dumps(caja)), "huella": huella}, contenido)
 
 
 @pytest.fixture(scope="session")
@@ -140,3 +167,39 @@ def instantanea_directa(ruta_o_df, caja, tmp_path) -> datos.Instantanea:
 
 
 FECHA_DE_PRUEBA = date(2023, 3, 2)
+
+
+def iguales(a: datos.Instantanea, b: datos.Instantanea) -> bool:
+    return a.zona.equals(b.zona) and a.huellas == b.huellas
+
+
+def esperar(condicion, segundos=10):
+    fin = time.monotonic() + segundos
+    while time.monotonic() < fin:
+        if condicion():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def intentar(gestor):
+    """instantanea() sin propagar DatosNoDisponibles: sirve para disparar el
+    reintento en segundo plano mientras la base sigue sin datos."""
+    try:
+        return gestor.instantanea()
+    except datos.DatosNoDisponibles:
+        return None
+
+
+def revisar_ya(gestor):
+    """Corre la revision de cambios ahora y en este hilo, sin esperar el minuto."""
+    assert gestor._revisando.acquire(blocking=False)
+    gestor._revisar_en_segundo_plano()
+
+
+def terminar_foto(gestor):
+    """Espera a que termine de guardarse la foto, que va en otro hilo: sin esto
+    las llamadas registradas dependerian de quien llega primero."""
+    if gestor._hilo_foto is not None:
+        gestor._hilo_foto.join(60)
+        assert not gestor._hilo_foto.is_alive()

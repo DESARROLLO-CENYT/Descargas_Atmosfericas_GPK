@@ -7,9 +7,11 @@
 - supabase: la unica fuente de produccion. La imagen no trae parquet, asi que
   arranca vacio y trae de la base lo que falta, comparando huellas (primero la
   global, despues por mes y por dia) y bajando solo los dias distintos. Desde
-  cero eso es la zona completa: ~38 mil filas, ~3,4 MB. Mientras no haya traido
-  nada, las consultas del tablero responden 503 (DatosNoDisponibles) en vez de
-  contestar como si no hubiera rayos.
+  cero eso es la zona completa: ~38 mil filas, ~3,4 MB. Para no pagarlo en cada
+  arranque en frio, parte de la foto de su cache que guarda en la propia base
+  (~0,6 MB, ver backend/foto.py) y solo baja los dias posteriores a ella.
+  Mientras no haya traido nada, las consultas del tablero responden 503
+  (DatosNoDisponibles) en vez de contestar como si no hubiera rayos.
 
 En las dos fuentes las consultas del tablero se responden desde memoria con el
 mismo codigo, asi que con los mismos datos dan exactamente el mismo resultado.
@@ -20,6 +22,7 @@ En memoria se guarda solo lo necesario:
 - por cada dia de toda la region, la cantidad de rayos y su huella, para los
   totales de las tarjetas y para detectar cambios.
 """
+import base64
 import json
 import os
 import struct
@@ -36,7 +39,10 @@ import numpy as np
 import polars as pl
 from sklearn.neighbors import BallTree
 
-from backend import lectura_parquet
+import psycopg2
+import psycopg2.errors
+
+from backend import foto, lectura_parquet
 from backend.db import SupabaseNoDisponible, consultar
 from backend.lectura_parquet import COLUMNAS
 
@@ -46,6 +52,11 @@ FUENTES = ("parquet", "supabase")
 # Cada cuanto se le pregunta a Supabase si los datos cambiaron, como maximo, y
 # solo mientras alguien usa el tablero. Es una consulta de una fila.
 REVISION_SEGUNDOS = 60
+
+# Si guardar la foto falla (por ejemplo, todavia no se aplico
+# sql/001_foto_tablero.sql), no se reintenta en cada revision: seria comprimir y
+# subir ~0,45 MB por minuto para volver a fallar. El tablero sigue igual.
+REINTENTO_FOTO_SEGUNDOS = 3600
 
 # Orden total y fijo de los rayos: con los mismos datos, las dos fuentes
 # producen las mismas filas en el mismo orden, y por lo tanto las mismas
@@ -65,6 +76,7 @@ _AGREGADOS_SQL = (
     "sum(latitud), sum(longitud)"
 )
 _TABLA = "public.gpk_descargas_atmosfericas_gold"
+_TABLA_FOTO = "public.gpk_tablero_foto"
 _FILTRO_CAJA_SQL = "latitud BETWEEN %(la0)s AND %(la1)s AND longitud BETWEEN %(lo0)s AND %(lo1)s"
 
 
@@ -116,6 +128,40 @@ class RemotoSupabase:
             f"FROM {_TABLA} WHERE fecha = ANY(%(dias)s) AND {_FILTRO_CAJA_SQL}",
             {"dias": dias, **caja})
         return pl.DataFrame(filas, schema=COLUMNAS, orient="row")
+
+    # La foto se lee en dos pasos: primero los datos que dicen si sirve (unos
+    # bytes) y solo si sirve, la foto (~0,6 MB). Asi una foto de otra zona o de
+    # otro formato no cuesta su descarga.
+    def leer_foto_meta(self) -> dict | None:
+        filas = _consulta_foto(f"SELECT formato, caja::text, huella_global FROM {_TABLA_FOTO} WHERE id = 1")
+        if not filas:
+            return None
+        formato, caja, huella = filas[0]
+        return {"formato": formato, "caja": json.loads(caja) if caja else None, "huella": huella}
+
+    def leer_foto(self) -> bytes | None:
+        # base64 y no bytea directo: en formato texto el bytea viaja en
+        # hexadecimal (el doble de bytes); base64 agrega un tercio
+        filas = _consulta_foto(f"SELECT encode(foto, 'base64') FROM {_TABLA_FOTO} WHERE id = 1")
+        return base64.b64decode(filas[0][0]) if filas else None
+
+    def guardar_foto(self, formato: int, caja: dict | None, huella: str, contenido: bytes) -> None:
+        consultar("SELECT public.guardar_foto_tablero(%s::smallint, %s::jsonb, %s, %s)",
+                  (formato, json.dumps(caja), huella, psycopg2.Binary(contenido)))
+
+
+def _consulta_foto(sql: str) -> list | None:
+    """Una tabla de foto que no existe o no se puede leer no es una caida de
+    Supabase: significa que no se aplico sql/001_foto_tablero.sql. Se sigue sin
+    foto, armando la cache desde las filas como antes."""
+    try:
+        return consultar(sql)
+    except SupabaseNoDisponible as e:
+        if isinstance(e.__cause__, (psycopg2.errors.UndefinedTable, psycopg2.errors.InsufficientPrivilege)):
+            print(f"La foto no esta disponible en la base ({type(e.__cause__).__name__}): "
+                  "se arma desde las filas. Aplicar sql/001_foto_tablero.sql")
+            return None
+        raise
 
 
 class Instantanea:
@@ -243,6 +289,13 @@ class GestorDatos:
         self._ultima_sincronizacion = None
         self._conectado = None
 
+        # (caja, huella global) de la foto que hay en la base, si se sabe. Si la
+        # instantanea coincide, no hace falta guardar otra.
+        self._foto_en_base = None
+        self._ultimo_fallo_foto = float("-inf")
+        self._guardando_foto = threading.Lock()
+        self._hilo_foto = None
+
     # ---- lectura ----
 
     def instantanea(self) -> Instantanea:
@@ -311,12 +364,13 @@ class GestorDatos:
             zona, huellas = leer_parquet(self._ruta, caja, con_huellas=False)
             inst = Instantanea(zona, huellas, version=("parquet", base), sincronizada=False)
         else:
-            # Se parte de cero y la sincronizacion trae todo lo que falta. Si
-            # la base no responde queda vacia y sin sincronizar: instantanea()
+            # Si la base no responde queda vacia y sin sincronizar: instantanea()
             # lo convierte en DatosNoDisponibles y la siguiente revision reintenta.
-            inst = self._sincronizar(Instantanea.vacia(), caja)
+            inst = self._sembrar(caja)
         self._inst = inst
         self._base = base
+        if self.fuente == "supabase":
+            self._guardar_foto_si_cambio(inst, caja)
 
     def _revisar_en_segundo_plano(self):
         try:
@@ -324,16 +378,87 @@ class GestorDatos:
             # cuelga, las reconstrucciones (por un Excel nuevo, por ejemplo) no
             # quedan esperando detras
             inst = self._inst
-            nueva = self._sincronizar(inst, self._caja_zona())
+            caja = self._caja_zona()
+            # Sin datos todavia (la base no respondio al arrancar): el reintento
+            # vuelve a partir de la foto, no de cero
+            nueva = self._sincronizar(inst, caja) if inst.sincronizada else self._sembrar(caja)
             with self._candado:
                 # Si mientras tanto se reconstruyo desde cero, esta revision
                 # partio de datos viejos y se descarta
                 if self._inst is inst:
                     self._inst = nueva
+            self._guardar_foto_si_cambio(nueva, caja)
         except Exception as e:
             print(f"Fallo la revision de cambios en Supabase: {e}")
         finally:
             self._revisando.release()
+
+    def _sembrar(self, caja: dict | None) -> Instantanea:
+        """Instantanea igualada con la base partiendo de la foto guardada, o de
+        cero si no hay foto que sirva. Vacia y sin sincronizar si la base no
+        responde."""
+        try:
+            inicial = self._desde_foto(caja)
+        except Exception as e:
+            if not isinstance(e, SupabaseNoDisponible):
+                traceback.print_exc()
+            print(f"No se pudo leer la foto de Supabase, se reintenta: {e}")
+            self._ultima_revision = time.monotonic()
+            self._conectado = False
+            return Instantanea.vacia()
+        return self._sincronizar(inicial or Instantanea.vacia(), caja)
+
+    def _desde_foto(self, caja: dict | None) -> Instantanea | None:
+        meta = self._remoto.leer_foto_meta()
+        if meta is None:
+            print("No hay foto guardada: la cache se arma desde las filas de la base")
+            return None
+        if meta["formato"] != foto.FORMATO or not foto.caja_cubre(meta["caja"], caja):
+            print("La foto guardada es de otro formato o de otra zona: la cache se arma desde las filas")
+            return None
+        contenido = self._remoto.leer_foto()
+        if contenido is None:
+            return None
+        try:
+            meta, zona, huellas = foto.desempaquetar(contenido)
+        except foto.FotoInvalida as e:
+            print(f"La foto guardada no se puede usar ({e}): la cache se arma desde las filas")
+            return None
+        if not foto.caja_cubre(meta["caja"], caja):
+            return None  # la reemplazaron entre las dos lecturas
+        self._foto_en_base = (meta["caja"], foto.texto_a_huella(meta["huella"]))
+        print(f"Arranque desde la foto: {len(contenido) / 1024:,.0f} KB, {len(zona):,} rayos de zona, "
+              f"{len(huellas):,} dias")
+        return Instantanea(foto.recortar(zona, caja), huellas, version=("foto", meta["huella"]),
+                           sincronizada=False)
+
+    def _guardar_foto_si_cambio(self, inst: Instantanea, caja: dict | None):
+        """Guarda una foto nueva si la de la base no coincide con estos datos. En
+        segundo plano: comprimir tarda y la peticion no tiene por que esperarlo."""
+        if not inst.sincronizada or self._foto_en_base == (caja, inst.huella_global()):
+            return
+        if time.monotonic() - self._ultimo_fallo_foto < REINTENTO_FOTO_SEGUNDOS:
+            return
+        if not self._guardando_foto.acquire(blocking=False):
+            return
+        self._hilo_foto = threading.Thread(target=self._guardar_foto, args=(inst, caja), daemon=True)
+        self._hilo_foto.start()
+
+    def _guardar_foto(self, inst: Instantanea, caja: dict | None):
+        try:
+            huella = inst.huella_global()
+            contenido = foto.empaquetar(inst.zona, inst.huellas, caja, huella)
+            self._remoto.guardar_foto(foto.FORMATO, caja, foto.huella_a_texto(huella), contenido)
+            self._foto_en_base = (caja, huella)
+            print(f"Foto guardada en la base: {len(contenido) / 1024:,.0f} KB")
+        except Exception as e:
+            # Subir la foto no gasta egress y no es imprescindible: si falla, el
+            # tablero sigue sirviendo igual y el proximo arranque usa las filas
+            self._ultimo_fallo_foto = time.monotonic()
+            print(f"No se pudo guardar la foto (se reintenta en "
+                  f"{REINTENTO_FOTO_SEGUNDOS // 60} min, el tablero sigue igual): {e}")
+        finally:
+            self._guardando_foto.release()
 
     def _sincronizar(self, inst: Instantanea, caja: dict | None) -> Instantanea:
         """Devuelve la instantanea igualada con Supabase, o la misma si no hay
