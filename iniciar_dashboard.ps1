@@ -99,14 +99,14 @@ function Preguntar-Fuente {
         Write-Host "   De donde quieres que salgan los datos?" -ForegroundColor White
         Write-Host ""
         Write-Host -NoNewline "     [1]  Parquet" -ForegroundColor Green
-        Write-Host "            Archivo local del repositorio." -ForegroundColor Gray
-        Write-Host "                            Arranca rapido y NO gasta internet" -ForegroundColor DarkGray
-        Write-Host "                            ni cupo de Supabase. Para el dia a dia." -ForegroundColor DarkGray
+        Write-Host "            Archivo local en datos/ (no va a git)." -ForegroundColor Gray
+        Write-Host "                            Arranca rapido y NO gasta cupo de" -ForegroundColor DarkGray
+        Write-Host "                            Supabase. Para pruebas y mejoras." -ForegroundColor DarkGray
         Write-Host ""
         Write-Host -NoNewline "     [2]  Base de datos" -ForegroundColor Yellow
         Write-Host "      Supabase (Postgres) en vivo." -ForegroundColor Gray
-        Write-Host "                            Los datos mas frescos, pero CONSUME" -ForegroundColor DarkGray
-        Write-Host "                            egress del plan gratuito. Para demos." -ForegroundColor DarkGray
+        Write-Host "                            Igual que produccion. CONSUME egress" -ForegroundColor DarkGray
+        Write-Host "                            del plan gratuito en cada arranque." -ForegroundColor DarkGray
         Write-Host ""
         Write-Host "     [3]  Detener el tablero" -ForegroundColor DarkGray
         Write-Host "     [0]  Salir" -ForegroundColor DarkGray
@@ -133,11 +133,12 @@ function Confirmar-Supabase {
     Write-Host "   Modo BASE DE DATOS (Supabase)" -ForegroundColor Yellow
     Write-Host "   ------------------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "   El tablero se conectara a Supabase y bajara solo los dias que" -ForegroundColor Gray
-    Write-Host "   hayan cambiado respecto al parquet que ya tiene guardado." -ForegroundColor Gray
+    Write-Host "   El tablero arranca igual que en produccion: lee la foto de su" -ForegroundColor Gray
+    Write-Host "   cache guardada en Supabase y baja solo los dias nuevos." -ForegroundColor Gray
     Write-Host ""
     Write-Host "   Ten en cuenta:" -ForegroundColor White
-    Write-Host "     - Consume egress del plan gratuito (5 GB al mes)." -ForegroundColor DarkYellow
+    Write-Host "     - Consume egress del plan gratuito (5 GB al mes): ~0,75 MB" -ForegroundColor DarkYellow
+    Write-Host "       por arranque con foto, ~3,9 MB si todavia no hay foto." -ForegroundColor DarkYellow
     Write-Host "     - Es el modo de produccion: sirve para demos y para" -ForegroundColor Gray
     Write-Host "       comprobar que la conexion con la base funciona." -ForegroundColor Gray
     Write-Host "     - Para el trabajo normal alcanza con la opcion 1," -ForegroundColor Gray
@@ -154,6 +155,16 @@ function Confirmar-Supabase {
 
     $r = (Read-Host "   Conectar a la base de datos? (s/N)").Trim().ToLower()
     return ($r -eq "s" -or $r -eq "si")
+}
+
+# El parquet es solo local y no esta en git: en un clon nuevo no existe. Sin
+# esta comprobacion el tablero arranca, la pagina carga y el lanzador dice
+# "listo", pero cada consulta de datos falla.
+function Comprobar-Parquet {
+    $parquet = Join-Path $PSScriptRoot "datos\Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet"
+    if (Test-Path $parquet) { return }
+    Salir-Con-Error "Falta el parquet local: datos\Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet" `
+        "No esta en git. Generalo con: python scripts\actualizar_parquet.py (usa RUTA_GOLD_PIPELINE del .env)"
 }
 
 # --- Apagado ---------------------------------------------------------------
@@ -194,6 +205,9 @@ if (-not $eleccion) {
     Write-Host "   Cancelado. No se levanto nada." -ForegroundColor DarkGray
     Write-Host ""
     exit 0
+}
+if ($eleccion -eq "parquet") {
+    Comprobar-Parquet
 }
 
 Clear-Host

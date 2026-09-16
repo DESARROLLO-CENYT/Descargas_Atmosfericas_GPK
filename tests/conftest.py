@@ -2,7 +2,7 @@
 
 Ninguna prueba se conecta a Supabase: el papel de la base lo cumple
 RemotoFalso, que responde las mismas consultas que RemotoSupabase calculandolas
-sobre el parquet del repositorio. Por si algo intentara conectarse igual, la URL
+sobre el parquet local. Por si algo intentara conectarse igual, la URL
 de Supabase apunta a un puerto local cerrado y falla sin salir a internet.
 """
 import json

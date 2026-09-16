@@ -27,4 +27,7 @@ services:
     #   FUENTE_DATOS=supabase         ya es el valor por defecto de la imagen;
     #                                 dejarla explicita evita sorpresas
     #   SUPABASE_DASHBOARD_DB_URL=... usuario dashboard_readonly, puerto 6543
+    # En la base tiene que estar aplicado sql/001_foto_tablero.sql (aplicado en
+    # Supabase el 2026-09-16). Sin el, funciona igual pero cada arranque en frio
+    # baja ~3,9 MB en vez de ~0,75 MB.
     # El puerto lo inyecta Render en $PORT, que el Dockerfile ya usa en su CMD.

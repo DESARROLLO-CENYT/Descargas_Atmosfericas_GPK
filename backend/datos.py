@@ -172,7 +172,8 @@ class Instantanea:
         self.zona = zona.sort(ORDEN, maintain_order=True)
         self.huellas = huellas
         self.version = version
-        # True si coincide con Supabase; False si es la copia del parquet
+        # True si ya se igualo con Supabase. False en modo parquet, y en modo
+        # supabase mientras no se igualo (vacia, o recien leida de la foto)
         self.sincronizada = sincronizada
         self.fecha_max = max(huellas) if huellas else None
         self._arbol = None
@@ -361,6 +362,13 @@ class GestorDatos:
     def _construir(self, base):
         caja = self._caja_zona()
         if self.fuente == "parquet":
+            # El parquet no esta en git: en un clon nuevo falta hasta generarlo.
+            # Sin esto la lectura fallaba con un 500 sin explicacion. Como _inst
+            # queda en None, la siguiente peticion lo vuelve a buscar.
+            if not os.path.isfile(self._ruta):
+                raise DatosNoDisponibles(
+                    f"Falta el parquet local ({self._ruta}). Es solo para trabajar en local y no esta en git: "
+                    "generalo con python scripts/actualizar_parquet.py")
             zona, huellas = leer_parquet(self._ruta, caja, con_huellas=False)
             inst = Instantanea(zona, huellas, version=("parquet", base), sincronizada=False)
         else:

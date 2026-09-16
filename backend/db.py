@@ -1,8 +1,12 @@
-"""Conexion de solo lectura a Supabase (Postgres), por el Transaction pooler.
+"""Conexion a Supabase (Postgres) por el Transaction pooler, con el usuario de
+solo lectura dashboard_readonly.
 
-Solo la usa backend/datos.py con FUENTE_DATOS=supabase, para revisar si los
-datos cambiaron y bajar los dias nuevos. Las consultas del tablero se responden
-desde memoria, asi que aca nunca hay mas de una o dos consultas a la vez.
+Solo la usa backend/datos.py con FUENTE_DATOS=supabase: para leer la foto de la
+cache al arrancar, revisar si los datos cambiaron, bajar los dias nuevos y
+guardar la foto nueva. Esto ultimo es lo unico que escribe, y solo a traves de
+guardar_foto_tablero() (sql/001_foto_tablero.sql): el usuario no tiene permiso
+de escritura sobre ninguna tabla. Las consultas del tablero se responden desde
+memoria, asi que aca nunca hay mas de una o dos consultas a la vez.
 """
 import os
 import threading

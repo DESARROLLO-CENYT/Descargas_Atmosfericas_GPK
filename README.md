@@ -27,42 +27,47 @@ panel izquierdo (ubicación, radio de búsqueda y rango de fechas):
 
 ## Fuentes de datos
 
-Los tres archivos viven en `datos/` y se leen al arrancar. Sus rutas están
-fijadas en `backend/main.py` (los Excel) y en `backend/datos.py` (el parquet).
-
-| Archivo | Contenido |
-|---|---|
-| `datos/Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet` | Histórico de descargas: fecha, hora (`HH:MM:SS`), latitud, longitud, corriente en kA, polaridad y error de localización. **779.109 registros entre 2021-01-01 y 2026-09-03.** |
-| `datos/Inventario_Estructuras_y_DPS_Final.xlsx` | Inventario de estructuras: coordenadas, circuito, tipo de apoyo y equipos de protección (DPS, DSD, cable de guarda, puesta a tierra). **759 estructuras.** |
-| `datos/Localizaciones_Final.xlsx` | Maestro de localizaciones. Define la jerarquía de filtros Campo → Locación/Circuito → Pórtico/Tramo. |
-
-### Elegir de dónde salen las descargas: parquet o Supabase
-
-La variable `FUENTE_DATOS` (en `.env` para local, en el panel de Render para
-producción) decide la fuente. El tablero muestra una etiqueta que la nombra:
-**Data Local (Parquet)** o **Base de datos (Supabase)**. En los dos casos los
-datos son reales y salen del mismo pipeline; lo único que cambia es si vienen de
-la copia del repositorio o en vivo de la base.
-
-| `FUENTE_DATOS` | Para qué | Cómo funciona |
+| Archivo | Contenido | ¿En git? |
 |---|---|---|
-| `parquet` *(por defecto)* | Desarrollo y pruebas | Lee el parquet del repositorio. **Nunca se conecta a Supabase**, aunque la URL esté configurada, así que no gasta egress. |
-| `supabase` | Producción y demos | Arranca con la copia del parquet y le pregunta a Supabase solo qué días cambiaron (huellas por mes y por día); baja únicamente esos. Responde desde memoria y revisa cambios como máximo una vez por minuto mientras alguien usa el tablero. Requiere `SUPABASE_DASHBOARD_DB_URL`. |
+| `datos/Inventario_Estructuras_y_DPS_Final.xlsx` | Inventario de estructuras: coordenadas, circuito, tipo de apoyo y equipos de protección (DPS, DSD, cable de guarda, puesta a tierra). **759 estructuras.** | Sí: no está en Supabase, este repositorio es su única fuente |
+| `datos/Localizaciones_Final.xlsx` | Maestro de localizaciones. Define la jerarquía de filtros Campo → Locación/Circuito → Pórtico/Tramo. | Sí |
+| `datos/Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet` | Histórico de descargas (fecha, hora, coordenadas, corriente, polaridad, error de localización): ~782 mil registros desde 2021. Copia del Gold del pipeline. | **No: solo local** |
 
-Si Supabase no responde, el tablero sigue funcionando con los últimos datos que
-tiene y la etiqueta lo avisa ("Sin conexión con la base · datos hasta …").
+Las descargas de **producción salen siempre de Supabase**. El parquet es una copia
+local de los mismos datos reales, **solo para trabajar en tu máquina**: pruebas,
+optimizaciones y mejoras del tablero sin gastar egress. No está en git ni en la
+imagen de Docker, así que producción no puede usarlo ni por error.
 
-**Cómo actualizar el parquet de pruebas** sin gastar egress, copiando el Gold que
-genera el pipeline (definir `RUTA_GOLD_PIPELINE` en `.env`):
+### Elegir de dónde salen las descargas
+
+La variable `FUENTE_DATOS` decide la fuente, y el tablero muestra una etiqueta
+que la nombra.
+
+| `FUENTE_DATOS` | Dónde | Etiqueta | Cómo funciona |
+|---|---|---|---|
+| `parquet` | Solo local (valor por defecto de `docker-compose.yml`) | **Data Local (Parquet)** | Lee `datos/…parquet`. **Nunca se conecta a Supabase**, aunque la URL esté configurada. Si el archivo se reemplaza, lo toma sin reiniciar. |
+| `supabase` | Producción (valor por defecto de la imagen) | **Base de datos (Supabase)** | Arranca desde la foto de su caché guardada en la base y baja solo los días nuevos (ver [Producción](#producción-render)). Responde desde memoria y revisa cambios como máximo una vez por minuto mientras alguien usa el tablero. Requiere `SUPABASE_DASHBOARD_DB_URL`. |
+
+Si Supabase no responde:
+- **Al arrancar, sin datos todavía:** las consultas responden 503 con *"Sin conexión
+  con la base de datos. Se reintenta en menos de un minuto."* No se muestra un
+  tablero con cero descargas, que parecería un dato real.
+- **Con datos ya cargados:** sigue sirviéndolos y la etiqueta lo avisa (*"Sin
+  conexión con la base · datos hasta …"*).
+
+### Generar o actualizar el parquet local
+
+Copia el Gold que genera el pipeline, sin tocar Supabase (definir
+`RUTA_GOLD_PIPELINE` en `.env`):
 
 ```bash
 python scripts/actualizar_parquet.py
 ```
 
-El script valida el archivo antes de reemplazarlo. Con `FUENTE_DATOS=parquet` el
-tablero toma la copia nueva solo, sin reiniciar. Para que llegue a Render hay que
-commitearla. Los Excel se actualizan igual que siempre: reemplazar el archivo
-conservando el nombre; el backend detecta el cambio por la fecha de modificación.
+El script valida el archivo antes de reemplazarlo (esquema, que no traiga menos
+del 95 % de las filas ni fechas más viejas) y lo reemplaza de forma atómica. **No
+se commitea.** Los Excel se actualizan reemplazando el archivo con el mismo nombre;
+el backend detecta el cambio por la fecha de modificación.
 
 > Los pórticos se identifican por el par `circuito␟tag`, no por el tag suelto:
 > el tag `PORT` se repite en varias locaciones y por sí solo no distingue nada.
@@ -76,8 +81,8 @@ menú de dónde salen los datos:
 
 | Opción | Fuente | Cuándo usarla |
 |---|---|---|
-| **1. Parquet** | El archivo de `datos/` | El día a día. Arranca en segundos y no gasta egress. |
-| **2. Base de datos** | Supabase en vivo | Demos y comprobar la conexión. Pide confirmación porque **consume egress**. |
+| **1. Parquet** | El archivo local de `datos/` | Pruebas y mejoras. Arranca en segundos y no gasta egress. Si falta el parquet, el lanzador lo dice y explica cómo generarlo. |
+| **2. Base de datos** | Supabase, igual que producción | Comprobar el comportamiento real. Pide confirmación porque **consume egress**: ~0,75 MB por arranque con foto, ~3,9 MB sin ella. |
 | **3. Detener** | — | Apaga el contenedor. |
 
 El lanzador abre Docker Desktop si estaba cerrado, levanta el contenedor
@@ -110,17 +115,24 @@ El despliegue en Render **no** usa este archivo, sino el `Dockerfile`.
 ## Pruebas
 
 Ninguna prueba se conecta a Supabase ni gasta egress: el papel de la base lo
-cumple un Supabase simulado sobre el parquet del repositorio.
+cumple un Supabase simulado sobre el parquet local, que tiene los mismos datos que
+el Gold. Si el parquet no existe, las pruebas que lo necesitan se saltan diciendo
+cómo generarlo.
 
 ```bash
 pip install -r requirements-dev.txt
 python -m pytest tests
 ```
 
-Cubren la sincronización con la base (días nuevos, recargados o borrados, caídas
-y recuperación), que modo parquet y modo Supabase den respuestas idénticas byte a
-byte, las consultas sobre los datos en memoria y el script de actualización del
-parquet.
+Cubren:
+- **Sincronización con la base:** arranque desde cero, días nuevos, recargados o
+  borrados, caídas al arrancar y recuperación.
+- **La foto de la caché** (`tests/test_foto.py`): formato y exactitud de las
+  huellas, arranque con foto sin bajar filas, foto vieja o de otra zona, fallos al
+  guardar y base sin la tabla de la foto.
+- **Respuestas idénticas byte a byte** entre el modo parquet y el modo Supabase,
+  arrancando desde cero y desde la foto.
+- Las consultas sobre los datos en memoria y el script de actualización del parquet.
 
 Dos pruebas de carga se corren a mano:
 
@@ -143,7 +155,7 @@ Render, corre la prueba de carga y reporta el pico de memoria contra los 512 MB.
 
 Producción vive en Render, se construye con el `Dockerfile` (no con
 `docker-compose.yml`) y **se despliega sola con cada push a `main`**
-(`autoDeploy: true` en `render.yaml`). No hay que subir nada a mano.
+(`autoDeploy: true` en `render.yaml`).
 
 ### Variables del panel de Render
 
@@ -151,33 +163,76 @@ Se cargan en *Environment*, no en un archivo, porque la URL es un secreto:
 
 | Variable | Valor | Por qué |
 |---|---|---|
-| `FUENTE_DATOS` | `supabase` | Sin ella el tablero se queda con la copia local y nunca ve los datos nuevos del pipeline. |
-| `SUPABASE_DASHBOARD_DB_URL` | URL del usuario `dashboard_readonly`, puerto 6543 | Usuario de solo lectura: el tablero nunca escribe en la base. |
+| `SUPABASE_DASHBOARD_DB_URL` | URL del usuario `dashboard_readonly`, Transaction pooler (puerto 6543) | Sin ella la imagen **se niega a arrancar**. |
+| `FUENTE_DATOS` | `supabase` | Ya es el valor por defecto de la imagen; dejarla explícita evita sorpresas. |
 
 `PORT` lo inyecta Render y el `Dockerfile` ya lo usa.
 
-### El parquet viaja en la imagen, y tiene que seguir así
+### La foto de la caché
 
-Aunque producción lea de Supabase, `datos/…​.parquet` **debe seguir en el
-repositorio**. En modo `supabase` el tablero no arranca vacío: parte de esa copia
-y solo le pide a la base los días que cambiaron, así que un arranque en frío
-cuesta unos KB.
+Render Free borra la memoria cada vez que el servicio se duerme (15 minutos sin
+tráfico), se redespliega o se reinicia, y no tiene discos persistentes. Sin nada
+más, cada arranque en frío le pediría a Supabase todas las descargas de la zona
+de las estructuras. Para evitarlo, el tablero guarda en la propia base una **foto
+comprimida de su caché** (`backend/foto.py`, ~450 KB) y la lee al despertar:
 
-Si se quitara el parquet, cada arranque en frío le pediría a Supabase la zona
-completa de las estructuras: 38.857 filas, unos 3,4 MB, frente a los ~6 KB de
-ahora (medido simulando el protocolo de Postgres sobre los mismos datos). Como el
-plan Free duerme el servicio a los 15 minutos sin tráfico, con 10 arranques al
-día serían ~1 GB de los 5 GB de egress del mes.
+```
+Despierta ─► lee los datos de la foto (unos bytes)
+              ├─ sirve (mismo formato, su zona cubre la actual)
+              │     └─► la descarga ─► compara huellas con Supabase
+              │                          ├─ iguales: listo, 0 filas
+              │                          └─ el pipeline publicó después: baja solo esos días
+              └─ no sirve o no hay ─► arma todo desde las filas
+Si los datos cambiaron, guarda una foto nueva en segundo plano (subir no gasta egress).
+```
+
+Medido el 2026-09-16 con la imagen de producción (512 MB, 0,1 de CPU):
+
+| Arranque | Contra Supabase real | Contra Postgres local |
+|---|---|---|
+| Sin foto | 3.867 KB | 3.332 KB |
+| Con foto, el pipeline publicó después | — | 619 KB (bajó solo 3 días) |
+| **Con foto al día** | **752 KB** | **607 KB** (0 filas) |
+| Revisión de cada minuto | — | 458 bytes |
+
+Con 10 arranques al día son ~225 MB al mes de los 5 GB del plan, frente a ~1,2 GB
+sin foto. Con 10 usuarios a la vez el tablero no gasta egress (responde desde
+memoria) y el pico de memoria medido fue de 432 MB de 512.
+
+La foto es prescindible: si está corrupta, es de otro formato, falla al guardarse
+o la tabla no existe, el tablero arma la caché desde las filas y sigue funcionando.
+Se puede borrar la fila sin perder datos; el próximo arranque la vuelve a armar.
+
+### Preparar la base (una sola vez)
+
+La foto necesita `sql/001_foto_tablero.sql`, **ya aplicado en Supabase el
+2026-09-16**. Si la base se recrea, se aplica en el *SQL Editor* de Supabase con
+el usuario `postgres`. Es idempotente: correrlo de nuevo no borra la foto.
+
+El usuario del tablero **sigue sin poder escribir ninguna tabla**: recibe `SELECT`
+sobre la foto y permiso para ejecutar `guardar_foto_tablero()`, que solo reemplaza
+esa fila. Incluye una política de lectura explícita, porque con RLS y sin
+política el usuario vería cero filas sin ningún error.
+
+Para comprobar que está bien aplicado:
+
+```sql
+SELECT
+  to_regclass('public.gpk_tablero_foto')                                   AS tabla,
+  has_function_privilege('dashboard_readonly',
+    'public.guardar_foto_tablero(smallint,jsonb,text,bytea)', 'EXECUTE')  AS tablero_puede_guardar,
+  has_table_privilege('dashboard_readonly', 'public.gpk_tablero_foto', 'INSERT') AS tablero_puede_insertar,
+  has_table_privilege('anon', 'public.gpk_tablero_foto', 'SELECT')        AS anon_puede_leer,
+  (SELECT count(*) FROM pg_policies WHERE tablename = 'gpk_tablero_foto')  AS politicas;
+```
+
+Resultado esperado: `gpk_tablero_foto | true | false | false | 1`.
 
 ### Antes de desplegar
 
 ```bash
 python -m pytest tests
 ```
-
-Y comprobar que el parquet de `datos/` esté al día (`scripts/actualizar_parquet.py`),
-porque es el punto de partida de producción: cuanto más viejo, más días tiene que
-bajar Supabase en cada arranque en frío.
 
 ---
 
@@ -187,15 +242,18 @@ bajar Supabase en cada arranque en frío.
 ├── backend/
 │   ├── main.py          API FastAPI: cruce espacial, filtros y endpoints
 │   ├── datos.py         Fuente de datos (parquet o Supabase) y sincronización
+│   ├── foto.py          Foto de la caché que se guarda en la base
 │   ├── lectura_parquet.py  Lectura del parquet en un proceso aparte
-│   ├── db.py            Conexión de solo lectura a Supabase
+│   ├── db.py            Conexión a Supabase con el usuario del tablero
 │   └── informe.py       Generación del informe en Excel
-├── datos/               Las tres fuentes de datos que lee el backend
-│   ├── Gold_Consolidado_Historico_Descargas_Electricas_GPK.parquet
+├── datos/
 │   ├── Inventario_Estructuras_y_DPS_Final.xlsx
-│   └── Localizaciones_Final.xlsx
+│   ├── Localizaciones_Final.xlsx
+│   └── Gold_…parquet    Solo local, no está en git (scripts/actualizar_parquet.py)
+├── sql/
+│   └── 001_foto_tablero.sql   Tabla y función de la foto (aplicado en Supabase)
 ├── scripts/
-│   └── actualizar_parquet.py  Copia el Gold del pipeline como parquet de pruebas
+│   └── actualizar_parquet.py  Copia el Gold del pipeline como parquet local
 ├── tests/               Pruebas (pytest) y pruebas de carga manuales
 ├── static/
 │   ├── index.html       Estructura del tablero (las cuatro vistas)
@@ -207,8 +265,7 @@ bajar Supabase en cada arranque en frío.
 ├── Dockerfile           Imagen de producción (la que usa Render)
 ├── docker-compose.yml   Entorno de desarrollo local (contenedor GPK_Tablero_Web)
 ├── render.yaml          Blueprint del despliegue
-├── requirements.txt     Dependencias con versiones fijadas
-└── MEJORAS_PENDIENTES.md
+└── requirements.txt     Dependencias con versiones fijadas
 ```
 
 > El pipeline que alimenta este tablero vive en el repositorio aparte

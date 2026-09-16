@@ -128,6 +128,19 @@ def test_la_etiqueta_solo_nombra_la_fuente(nuevo_gestor, df_completo):
     assert base.estado()["mensaje"] == "Base de datos (Supabase)"
 
 
+def test_sin_parquet_local_avisa_como_generarlo(nuevo_gestor, tmp_path):
+    ruta = tmp_path / "datos.parquet"
+    gestor = nuevo_gestor("parquet", ruta)
+
+    # Clon nuevo: el parquet no esta en git. 503 con la instruccion, no un 500
+    with pytest.raises(datos.DatosNoDisponibles, match="actualizar_parquet"):
+        gestor.instantanea()
+
+    # En cuanto aparece, la siguiente peticion lo toma sin reiniciar
+    ruta.write_bytes(PARQUET.read_bytes())
+    assert gestor.instantanea().fecha_max is not None
+
+
 def test_fuente_parquet_recarga_si_cambia_el_archivo(nuevo_gestor, parquet_viejo, tmp_path, ultimos_dias):
     ruta = tmp_path / "datos.parquet"
     ruta.write_bytes(parquet_viejo.read_bytes())

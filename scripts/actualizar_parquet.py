@@ -1,4 +1,4 @@
-"""Actualiza el parquet de pruebas del tablero con el Gold que genera el pipeline.
+"""Actualiza el parquet local del tablero con el Gold que genera el pipeline.
 
 No se conecta a Supabase ni gasta egress: copia el archivo que el pipeline deja
 cada dia en Data/3. Gold, que tiene exactamente los mismos datos que sube a la
@@ -49,7 +49,7 @@ def resumen(ruta: Path):
 
 def main():
     load_dotenv(RAIZ / ".env")
-    parser = argparse.ArgumentParser(description="Copia el Gold del pipeline como parquet de pruebas.")
+    parser = argparse.ArgumentParser(description="Copia el Gold del pipeline como parquet local (solo para trabajar en tu maquina).")
     parser.add_argument("origen", nargs="?", default=os.environ.get("RUTA_GOLD_PIPELINE"),
                         help="parquet Gold del pipeline (por defecto RUTA_GOLD_PIPELINE del .env)")
     parser.add_argument("--forzar", action="store_true",
