@@ -146,7 +146,7 @@ class RemotoSupabase:
         return base64.b64decode(filas[0][0]) if filas else None
 
     def guardar_foto(self, formato: int, caja: dict | None, huella: str, contenido: bytes) -> None:
-        consultar("SELECT public.guardar_foto_tablero(%s::smallint, %s::jsonb, %s, %s)",
+        consultar("SELECT public.guardar_foto_tablero(%s::smallint, %s::jsonb, %s::text, %s)",
                   (formato, json.dumps(caja), huella, psycopg2.Binary(contenido)))
 
 
