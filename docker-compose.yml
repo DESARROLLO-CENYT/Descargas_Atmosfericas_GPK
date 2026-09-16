@@ -1,12 +1,27 @@
 services:
   web:
     build: .
+
+    # Nombre fijo. Sin esto Docker lo inventa a partir del nombre de la carpeta
+    # (dashboard_descargas_atmosfericas_2026-web-1) y en `docker ps` queda un
+    # nombre larguisimo que no se distingue de los del orquestador. El prefijo
+    # GPK_ sigue la convencion de los contenedores de Airflow.
+    container_name: GPK_Tablero_Web
+
     ports:
       - "8080:8000"
     volumes:
       - .:/app
     environment:
       - PORT=8000
+      # De donde salen las descargas. Lo fija Iniciar_Dashboard.bat al arrancar,
+      # segun la opcion del menu. Levantado a mano con `docker compose up` cae
+      # al valor del .env y, si ahi tampoco esta, a parquet: el modo que no
+      # gasta egress. SUPABASE_DASHBOARD_DB_URL no se pasa aca a proposito, la
+      # lee el backend del .env que entra por el volumen; pasarla vacia cuando
+      # no esta definida taparia la del archivo.
+      - FUENTE_DATOS=${FUENTE_DATOS:-parquet}
+
     # El volumen ya trae el codigo nuevo al contenedor, pero uvicorn lo carga
     # una sola vez al arrancar: sin --reload se queda con el backend viejo en
     # memoria mientras el frontend ya es el nuevo, y el tablero falla a medias.
